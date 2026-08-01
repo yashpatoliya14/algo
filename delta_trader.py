@@ -14,6 +14,7 @@ Setup:
     4. Run live trading: `python delta_trader.py`
 """
 
+import email.utils
 import hashlib
 import hmac
 import json
@@ -53,10 +54,24 @@ class DeltaClient:
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
+        self.time_offset = 0
+        self._retrying = False
+        self.sync_time_offset()
+
+    def sync_time_offset(self):
+        """Synchronize local system clock with Delta Exchange server time."""
+        try:
+            resp = self.session.get(f"{self.base_url}/v2/products", timeout=5)
+            if "Date" in resp.headers:
+                server_dt = email.utils.parsedate_to_datetime(resp.headers["Date"])
+                server_time = int(server_dt.timestamp())
+                self.time_offset = server_time - int(time.time())
+        except Exception:
+            pass
 
     def _generate_signature(self, method: str, path: str, query_string: str = "", payload: str = "") -> tuple[str, str]:
         """Generate HMAC SHA256 signature for Delta REST API v2."""
-        timestamp = str(int(time.time()))
+        timestamp = str(int(time.time() + self.time_offset))
         signature_data = method + timestamp + path + query_string + payload
         signature = hmac.new(
             self.api_secret.encode("utf-8"),
@@ -96,9 +111,36 @@ class DeltaClient:
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
-            print(f"[DELTA API ERROR] {method} {path}: {e}")
             if hasattr(e, 'response') and e.response is not None:
+                try:
+                    err_json = e.response.json()
+                    err_info = err_json.get("error", {})
+                    err_code = err_info.get("code")
+
+                    # Handle clock skew (expired_signature) by setting offset and retrying
+                    if err_code == "expired_signature":
+                        server_time = err_info.get("context", {}).get("server_time")
+                        if server_time and not self._retrying:
+                            self.time_offset = int(server_time) - int(time.time())
+                            self._retrying = True
+                            try:
+                                return self._request(method, path, params=params, payload=payload, auth=auth)
+                            finally:
+                                self._retrying = False
+
+                    # Handle IP Whitelist Restriction
+                    if err_code == "ip_not_whitelisted_for_api_key":
+                        client_ip = err_info.get("context", {}).get("client_ip", "Unknown")
+                        print(f"\n\033[93m[DELTA API ERROR] IP Whitelist Restriction!\033[0m")
+                        print(f"  Your current public IP: \033[1m\033[96m{client_ip}\033[0m")
+                        print(f"  \033[97mAction Required: Add IP '{client_ip}' to your Delta Exchange API Key whitelist, or remove IP restrictions in your Delta API Key settings.\033[0m\n")
+                except Exception:
+                    pass
+
+                print(f"[DELTA API ERROR] {method} {path}: {e}")
                 print(f"  Response Body: {e.response.text}")
+            else:
+                print(f"[DELTA API ERROR] {method} {path}: {e}")
             raise
 
     # Public Endpoints

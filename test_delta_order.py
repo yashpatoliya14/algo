@@ -75,6 +75,18 @@ def main():
                 print(f"    Asset: {WHITE}{asset:<6}{RESET} Total Balance: {WHITE}{balance_val}{RESET} | Available: {GREEN}{available_val}{RESET}")
     except Exception as e:
         print(f"  {RED}[FAIL] Authentication Error: {e}{RESET}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                err_data = e.response.json()
+                err_code = err_data.get("error", {}).get("code")
+                if err_code == "ip_not_whitelisted_for_api_key":
+                    client_ip = err_data.get("error", {}).get("context", {}).get("client_ip", "Unknown")
+                    print(f"\n  {YELLOW}[ACTION REQUIRED] IP Whitelist Restriction Detected!{RESET}")
+                    print(f"  Your current IP address is: {BOLD}{CYAN}{client_ip}{RESET}")
+                    print(f"  Please add {CYAN}{client_ip}{RESET} to your API Key whitelist in Delta Exchange settings,")
+                    print(f"  or edit your API key on Delta Exchange to disable IP restriction.\n")
+            except Exception:
+                pass
         print("  Please check your API key, secret, and base URL in .env.")
         sys.exit(1)
 
