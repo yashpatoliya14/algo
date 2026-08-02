@@ -236,9 +236,10 @@ class DeltaTrader:
         self.active_position = None
         self.peak_price = None
         self.trail_stop_price = None
-        self.last_signal_key = None
         # symbols list will hold dicts: {"delta": <DELTA_SYM>, "canon": <BASE/QUOTE>}
         self.symbols = []
+        # Track already-notified signals so we don't spam Telegram
+        self._notified_signals: set[str] = set()
 
     def print_banner(self):
         mode_str = "\033[93m[DRY RUN / PAPER TRADING]\033[0m" if self.dry_run else "\033[91m[LIVE REAL TRADING]\033[0m"
@@ -354,60 +355,7 @@ class DeltaTrader:
         print(f"  Current Price: ${curr_price:,.2f} | 4H Bar Close: ${curr_bar['close']:,.2f}")
         print(f"  EMA21: ${curr_bar['ema_fast']:,.2f} | Supertrend: {curr_bar['st_dir']} ({'BULL' if curr_bar['st_dir'] == 1 else 'BEAR'})")
 
-        if signal:
-            signal_key = self._signal_key(signal, signal_type, curr_bar)
-            if signal_key == self.last_signal_key:
-                print("  Signal already notified for this candle.")
-                signal = None
-            else:
-                self.last_signal_key = signal_key
-                print(f"  \033[92m[SIGNAL DETECTED]\033[0m Direction: {signal.upper()} | Type: {signal_type.upper()}")
-                try:
-                # Prepare suggested entry, stop and size for notification
-                atr_val = float(curr_bar.get("atr", 0.0))
-                stop_dist = self.params.stop_atr_mult * atr_val
-                entry_price = float(curr_bar["close"]) if "close" in curr_bar else curr_price
-                trail_activation = float(self.params.trail_pct_activation)
-                trail_distance = float(self.params.trail_pct_distance)
-
-                # Position sizing (mirror _execute_entry logic)
-                equity = 10000.0
-                if not self.dry_run:
-                    try:
-                        balances = self.client.get_balances()
-                        if balances:
-                            equity = float(balances[0].get("balance", equity))
-                    except Exception:
-                        pass
-
-                risk_amount = equity * (self.risk_pct / 100.0)
-                contracts = max(1, int(risk_amount / max(1e-8, stop_dist)))
-                if signal == "long":
-                    stop_price = entry_price - stop_dist
-                else:
-                    stop_price = entry_price + stop_dist
-
-                # Send detailed signal notification with sizing suggestions
-                    self.notifier.signal_detailed(
-                        self.symbol_canonical,
-                        signal,
-                        signal_type,
-                        float(curr_bar["close"]),
-                        entry_price,
-                        contracts,
-                        stop_price,
-                        self.risk_pct,
-                        self._format_candle_time(curr_bar),
-                        trail_activation,
-                        trail_distance,
-                        "No fixed TP; exit on trailing stop or trend reversal",
-                    )
-                except Exception:
-                    try:
-                        self.notifier.signal(self.symbol_canonical, signal, signal_type, float(curr_bar["close"]))
-                    except Exception:
-                        pass
-        else:
+        if not signal:
             print("  No new signal on current closed 4H candle.")
 
         # Check existing active position
@@ -426,7 +374,16 @@ class DeltaTrader:
         if pos_size != 0 or self.active_position is not None:
             self._manage_active_position(curr_price, curr_bar)
         elif signal is not None:
-            self._execute_entry(signal, signal_type, curr_bar, curr_price)
+            # Duplicate signal guard: same candle + same signal = skip repeat
+            sig_key = self._signal_key(signal, signal_type, curr_bar)
+            if sig_key in self._notified_signals:
+                print(f"  Signal already processed for this candle, skipping. (key={sig_key})")
+            else:
+                self._notified_signals.add(sig_key)
+                # Prune old keys to prevent memory leak (keep last 50)
+                if len(self._notified_signals) > 50:
+                    self._notified_signals = set(list(self._notified_signals)[-50:])
+                self._execute_entry(signal, signal_type, curr_bar, curr_price)
 
     def _execute_entry(self, direction: str, signal_type: str, curr_bar, current_price: float):
         """Calculate size, place market order and initial stop loss."""
@@ -454,7 +411,7 @@ class DeltaTrader:
         contracts = max(1, int(risk_amount / stop_dist))
 
         print(f"\n  \033[96m>>> EXECUTING ENTRY <<<\033[0m")
-        print(f"  Direction:   {direction.toUpperCase()}")
+        print(f"  Direction:   {direction.upper()}")
         print(f"  Side:        {side.upper()}")
         print(f"  Contracts:   {contracts}")
         print(f"  Entry Price: ${current_price:,.2f}")
@@ -472,9 +429,25 @@ class DeltaTrader:
                 "type": signal_type,
             }
             try:
-                self.notifier.execution(self.symbol_canonical, direction, contracts, current_price, stop_price)
+                self.notifier.signal_detailed(
+                    self.symbol_canonical,
+                    direction,
+                    signal_type,
+                    current_price,
+                    current_price,
+                    contracts,
+                    stop_price,
+                    self.risk_pct,
+                    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                    float(self.params.trail_pct_activation),
+                    float(self.params.trail_pct_distance),
+                    "No fixed TP; exit on trailing stop or trend reversal",
+                )
             except Exception:
-                pass
+                try:
+                    self.notifier.execution(self.symbol_canonical, direction, contracts, current_price, stop_price)
+                except Exception:
+                    pass
         else:
             try:
                 # Set leverage
@@ -498,9 +471,25 @@ class DeltaTrader:
                     "type": signal_type,
                 }
                 try:
-                    self.notifier.execution(self.symbol_canonical, direction, contracts, current_price, stop_price)
+                    self.notifier.signal_detailed(
+                        self.symbol_canonical,
+                        direction,
+                        signal_type,
+                        current_price,
+                        current_price,
+                        contracts,
+                        stop_price,
+                        self.risk_pct,
+                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                        float(self.params.trail_pct_activation),
+                        float(self.params.trail_pct_distance),
+                        "No fixed TP; exit on trailing stop or trend reversal",
+                    )
                 except Exception:
-                    pass
+                    try:
+                        self.notifier.execution(self.symbol_canonical, direction, contracts, current_price, stop_price)
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"  \033[91m[ORDER FAILED]\033[0m {e}")
 

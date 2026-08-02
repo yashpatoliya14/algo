@@ -100,14 +100,20 @@ async function runCycle(symbol) {
       else if (isStFlip) { signal = 'short'; signalType = 'fresh_trend'; }
     }
 
-    if (!signal) return;
+    if (!signal) {
+      lastSignalBySymbol.delete(symbol.canon);
+      return;
+    }
 
     const candleTime = fmtTime(curr.ts);
-    const signalKey = `${symbol.canon}|${signal}|${signalType}|${curr.ts}`;
-    if (lastSignalBySymbol.get(symbol.canon) === signalKey) {
+    const signalKey = `${symbol.canon}|${signal}|${signalType}`;
+    const previousSignalKey = lastSignalBySymbol.get(symbol.canon) || '';
+
+    if (previousSignalKey === signalKey) {
       console.log(`[${candleTime}] Signal already notified for ${symbol.canon}`);
       return;
     }
+
     lastSignalBySymbol.set(symbol.canon, signalKey);
 
     const entry = round2(curr.close);
