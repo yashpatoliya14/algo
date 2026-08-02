@@ -69,11 +69,40 @@ class TelegramNotifier:
         except Exception:
             pass
 
-    def signal_detailed(self, symbol: str, direction: str, signal_type: str, price: float, entry_price: float, size: int, stop_price: float, risk_pct: float):
-        if not ON_SIGNAL:
+    def signal_detailed(
+        self,
+        symbol: str,
+        direction: str,
+        signal_type: str,
+        price: float,
+        entry_price: float,
+        size: int,
+        stop_price: float,
+        risk_pct: float,
+        candle_time: str | None = None,
+        trail_activation: float | None = None,
+        trail_distance: float | None = None,
+        tp_note: str | None = None,
+    ):
+        if not self.on_signal:
             return
-        txt = (
-            f"Signal\nSymbol: {symbol}\nDirection: {direction.upper()}\nType: {signal_type}\n"
-            f"Signal Price: {price:.2f}\nSuggested Entry: {entry_price:.2f}\nSize: {size}\nStop Price: {stop_price:.2f}\nRisk %: {risk_pct}%"
-        )
+        lines = [
+            "Signal",
+            f"Symbol: {symbol}",
+            f"Direction: {direction.upper()}",
+            f"Type: {signal_type}",
+        ]
+        if candle_time:
+            lines.append(f"Candle Time: {candle_time}")
+        lines.extend([
+            f"Signal Price: {price:.2f}",
+            f"Suggested Entry: {entry_price:.2f}",
+            f"Size: {size}",
+            f"Stop Loss: {stop_price:.2f}",
+            f"Risk %: {risk_pct}%",
+        ])
+        if trail_activation is not None and trail_distance is not None:
+            lines.append(f"Trail: activate after +{trail_activation:.2f}% move, then trail {trail_distance:.2f}% behind peak")
+        lines.append(f"TP / Exit Plan: {tp_note or 'No fixed TP; exit on trailing stop or trend reversal'}")
+        txt = "\n".join(lines)
         self.send(txt)

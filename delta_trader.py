@@ -236,6 +236,7 @@ class DeltaTrader:
         self.active_position = None
         self.peak_price = None
         self.trail_stop_price = None
+        self.last_signal_key = None
         # symbols list will hold dicts: {"delta": <DELTA_SYM>, "canon": <BASE/QUOTE>}
         self.symbols = []
 
@@ -316,6 +317,25 @@ class DeltaTrader:
 
         return signal, signal_type, curr
 
+    def _signal_key(self, signal: str, signal_type: str, curr_bar) -> str:
+        candle_time = getattr(curr_bar, "name", None)
+        if hasattr(candle_time, "to_pydatetime"):
+            candle_time = candle_time.to_pydatetime()
+        if hasattr(candle_time, "timestamp"):
+            candle_ts = int(candle_time.timestamp())
+        else:
+            candle_ts = int(time.time())
+        return f"{self.symbol_canonical}|{signal}|{signal_type}|{candle_ts}"
+
+    def _format_candle_time(self, curr_bar) -> str:
+        candle_time = getattr(curr_bar, "name", None)
+        if candle_time is None:
+            return ""
+        try:
+            return candle_time.strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            return str(candle_time)
+
     def run_trading_cycle(self):
         """Single poll & trading check cycle."""
         timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -335,12 +355,20 @@ class DeltaTrader:
         print(f"  EMA21: ${curr_bar['ema_fast']:,.2f} | Supertrend: {curr_bar['st_dir']} ({'BULL' if curr_bar['st_dir'] == 1 else 'BEAR'})")
 
         if signal:
-            print(f"  \033[92m[SIGNAL DETECTED]\033[0m Direction: {signal.upper()} | Type: {signal_type.upper()}")
-            try:
+            signal_key = self._signal_key(signal, signal_type, curr_bar)
+            if signal_key == self.last_signal_key:
+                print("  Signal already notified for this candle.")
+                signal = None
+            else:
+                self.last_signal_key = signal_key
+                print(f"  \033[92m[SIGNAL DETECTED]\033[0m Direction: {signal.upper()} | Type: {signal_type.upper()}")
+                try:
                 # Prepare suggested entry, stop and size for notification
                 atr_val = float(curr_bar.get("atr", 0.0))
                 stop_dist = self.params.stop_atr_mult * atr_val
                 entry_price = float(curr_bar["close"]) if "close" in curr_bar else curr_price
+                trail_activation = float(self.params.trail_pct_activation)
+                trail_distance = float(self.params.trail_pct_distance)
 
                 # Position sizing (mirror _execute_entry logic)
                 equity = 10000.0
@@ -360,7 +388,6 @@ class DeltaTrader:
                     stop_price = entry_price + stop_dist
 
                 # Send detailed signal notification with sizing suggestions
-                try:
                     self.notifier.signal_detailed(
                         self.symbol_canonical,
                         signal,
@@ -370,15 +397,16 @@ class DeltaTrader:
                         contracts,
                         stop_price,
                         self.risk_pct,
+                        self._format_candle_time(curr_bar),
+                        trail_activation,
+                        trail_distance,
+                        "No fixed TP; exit on trailing stop or trend reversal",
                     )
                 except Exception:
-                    # fallback to simple signal if detailed fails
                     try:
                         self.notifier.signal(self.symbol_canonical, signal, signal_type, float(curr_bar["close"]))
                     except Exception:
                         pass
-            except Exception:
-                pass
         else:
             print("  No new signal on current closed 4H candle.")
 
