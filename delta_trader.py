@@ -497,33 +497,54 @@ class DeltaTrader:
                     pass
 
     def start_loop(self):
-        """Continuous polling loop with interactive multi-symbol selection."""
-        # Interactive symbol selection
+        """Continuous polling loop using only environment `SYMBOLS` or `SYMBOL` (no terminal input)."""
         print()
-        print("Enter symbols to monitor (one per line). Type 'q' to finish. Press Enter with no input to use default symbol.")
-        symbols = []
+        print("Starting trader using SYMBOLS from environment only.")
+
+        # Read and sanitize env vars. Support quoted values from .env files.
+        def _strip_quotes(s: str) -> str:
+            s = s.strip()
+            if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+                return s[1:-1]
+            return s
+
+        symbols_env = _strip_quotes(os.getenv("SYMBOLS", ""))
+        selected = []
+        if symbols_env:
+            for part in symbols_env.split(","):
+                s = part.strip()
+                if not s:
+                    continue
+                try:
+                    canon = to_ccxt(s)
+                    delta = to_delta(canon)
+                    selected.append({"delta": delta, "canon": canon})
+                except Exception as e:
+                    print(f"  Invalid SYMBOLS entry ignored: {s} ({e})")
+        else:
+            # Fallback to single SYMBOL env var or default set at init
+            env_symbol = _strip_quotes(os.getenv("SYMBOL", "")).strip()
+            if env_symbol:
+                try:
+                    canon = to_ccxt(env_symbol)
+                    delta = to_delta(canon)
+                    selected.append({"delta": delta, "canon": canon})
+                except Exception as e:
+                    print(f"  Invalid SYMBOL env ignored: {env_symbol} ({e})")
+            else:
+                # final fallback to the pre-initialized single symbol
+                selected = [{"delta": self.symbol, "canon": self.symbol_canonical}]
+
+        # Ensure we always have at least one symbol
+        if not selected:
+            print("No valid symbols parsed from environment — using default symbol.")
+            selected = [{"delta": self.symbol, "canon": self.symbol_canonical}]
+
+        self.symbols = selected
+
+        # Notify selected symbols (use canonical forms)
         try:
-            while True:
-                s = input("Symbol (or 'q' to finish): ").strip()
-                if s.lower() == 'q':
-                    break
-                if s == "":
-                    if not symbols:
-                        symbols = [self.symbol]
-                    break
-                symbols.append(s)
-        except (KeyboardInterrupt, EOFError):
-            print("\nSelection cancelled — using default symbol.")
-            symbols = [self.symbol]
-
-        if not symbols:
-            symbols = [self.symbol]
-
-        self.symbols = symbols
-
-        # Notify selected symbols
-        try:
-            self.notifier.send(f"Monitoring symbols: {', '.join(self.symbols)}")
+            self.notifier.send(f"Monitoring symbols: {', '.join([s['canon'] for s in self.symbols])}")
         except Exception:
             pass
 
@@ -535,10 +556,11 @@ class DeltaTrader:
                 for sym in self.symbols:
                     try:
                         # set current symbol and run a single check
-                        self.symbol = sym
+                        self.symbol = sym["delta"]
+                        self.symbol_canonical = sym["canon"]
                         self.run_trading_cycle()
                     except Exception as e:
-                        print(f"Unexpected error for {sym}: {e}")
+                        print(f"Unexpected error for {sym['canon']}: {e}")
                     # small pause between symbols to reduce burst volume
                     time.sleep(0.5)
 
