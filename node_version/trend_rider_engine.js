@@ -104,12 +104,14 @@ function compute_indicators(candles, p = {}) {
   const rsi_arr = rsi(close, p.rsi_period || 14);
   const st = supertrend_full(high, low, close, p.st_period || 10, p.st_mult || 3.0);
 
-  // Donchian
+  // Donchian — shift(1) to exclude current bar, matching Python's
+  // df["high"].shift(1).rolling(donchian_period).max()
   const donchian_high = new Array(n).fill(NaN);
   const donchian_low = new Array(n).fill(NaN);
   const donPeriod = p.donchian_period || 30;
-  for (let i = donPeriod; i < n; i++) {
+  for (let i = donPeriod + 1; i < n; i++) {
     let maxH = -Infinity, minL = Infinity;
+    // Window: [i - donPeriod, i - 1] — excludes current bar (shift 1)
     for (let j = i - donPeriod; j < i; j++) {
       if (high[j] > maxH) maxH = high[j];
       if (low[j] < minL) minL = low[j];
