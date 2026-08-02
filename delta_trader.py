@@ -24,6 +24,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import numpy as np
 import pandas as pd
 import requests
@@ -35,13 +38,6 @@ from trend_rider_engine import (
 )
 from telegram_notifier import TelegramNotifier
 from symbol_utils import to_ccxt, to_delta
-
-# Load .env file if available
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 
 # ============================================================================
@@ -341,7 +337,46 @@ class DeltaTrader:
         if signal:
             print(f"  \033[92m[SIGNAL DETECTED]\033[0m Direction: {signal.upper()} | Type: {signal_type.upper()}")
             try:
-                self.notifier.signal(self.symbol_canonical, signal, signal_type, float(curr_bar["close"]))
+                # Prepare suggested entry, stop and size for notification
+                atr_val = float(curr_bar.get("atr", 0.0))
+                stop_dist = self.params.stop_atr_mult * atr_val
+                entry_price = float(curr_bar["close"]) if "close" in curr_bar else curr_price
+
+                # Position sizing (mirror _execute_entry logic)
+                equity = 10000.0
+                if not self.dry_run:
+                    try:
+                        balances = self.client.get_balances()
+                        if balances:
+                            equity = float(balances[0].get("balance", equity))
+                    except Exception:
+                        pass
+
+                risk_amount = equity * (self.risk_pct / 100.0)
+                contracts = max(1, int(risk_amount / max(1e-8, stop_dist)))
+                if signal == "long":
+                    stop_price = entry_price - stop_dist
+                else:
+                    stop_price = entry_price + stop_dist
+
+                # Send detailed signal notification with sizing suggestions
+                try:
+                    self.notifier.signal_detailed(
+                        self.symbol_canonical,
+                        signal,
+                        signal_type,
+                        float(curr_bar["close"]),
+                        entry_price,
+                        contracts,
+                        stop_price,
+                        self.risk_pct,
+                    )
+                except Exception:
+                    # fallback to simple signal if detailed fails
+                    try:
+                        self.notifier.signal(self.symbol_canonical, signal, signal_type, float(curr_bar["close"]))
+                    except Exception:
+                        pass
             except Exception:
                 pass
         else:
@@ -544,7 +579,8 @@ class DeltaTrader:
 
         # Notify selected symbols (use canonical forms)
         try:
-            self.notifier.send(f"Monitoring symbols: {', '.join([s['canon'] for s in self.symbols])}")
+            symbols_list = [s["canon"] for s in self.symbols]
+            self.notifier.started(symbols_list, self.timeframe, self.dry_run, self.risk_pct, self.leverage)
         except Exception:
             pass
 

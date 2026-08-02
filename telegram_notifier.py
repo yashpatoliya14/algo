@@ -2,19 +2,15 @@ import os
 import requests
 from typing import Optional
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-ON_SIGNAL = os.getenv("TELEGRAM_ON_SIGNAL", "true").lower() == "true"
-ON_EXEC = os.getenv("TELEGRAM_ON_EXECUTION", "true").lower() == "true"
-ON_EXIT = os.getenv("TELEGRAM_ON_EXIT", "true").lower() == "true"
-
 API_URL = "https://api.telegram.org/bot{token}/{method}"
 
 
 def _post(method: str, data: dict) -> dict:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
         return {}
-    url = API_URL.format(token=TELEGRAM_TOKEN, method=method)
+    url = API_URL.format(token=token, method=method)
     try:
         r = requests.post(url, json=data, timeout=10)
         return r.json()
@@ -24,10 +20,14 @@ def _post(method: str, data: dict) -> dict:
 
 class TelegramNotifier:
     def __init__(self, chat_id: Optional[str] = None):
-        self.chat_id = chat_id or TELEGRAM_CHAT_ID
+        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+        self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.on_signal = os.getenv("TELEGRAM_ON_SIGNAL", "true").lower() == "true"
+        self.on_exec = os.getenv("TELEGRAM_ON_EXECUTION", "true").lower() == "true"
+        self.on_exit = os.getenv("TELEGRAM_ON_EXIT", "true").lower() == "true"
 
     def send(self, text: str, parse_mode: Optional[str] = None):
-        if not self.chat_id or not TELEGRAM_TOKEN:
+        if not self.chat_id or not self.token:
             return None
         payload = {"chat_id": self.chat_id, "text": text, "disable_notification": False}
         if parse_mode:
@@ -35,13 +35,13 @@ class TelegramNotifier:
         return _post("sendMessage", payload)
 
     def signal(self, symbol: str, direction: str, signal_type: str, price: float):
-        if not ON_SIGNAL:
+        if not self.on_signal:
             return
         txt = f"Signal\nSymbol: {symbol}\nDirection: {direction.upper()}\nType: {signal_type}\nPrice: {price:.2f}"
         self.send(txt)
 
     def execution(self, symbol: str, direction: str, size: int, entry_price: float, stop_price: float):
-        if not ON_EXEC:
+        if not self.on_exec:
             return
         txt = (
             f"Execution\nSymbol: {symbol}\nDirection: {direction.upper()}\nSize: {size}\n"
@@ -50,9 +50,30 @@ class TelegramNotifier:
         self.send(txt)
 
     def exit(self, symbol: str, direction: str, exit_price: float, pnl: float):
-        if not ON_EXIT:
+        if not self.on_exit:
             return
         txt = (
             f"Exit\nSymbol: {symbol}\nDirection: {direction.upper()}\nExit Price: {exit_price:.2f}\nPnL: {pnl:+.2f}"
+        )
+        self.send(txt)
+
+    def started(self, symbols: list[str], timeframe: str, dry_run: bool, risk_pct: float, leverage: int):
+        """Send a start/confirmation message with runtime settings."""
+        mode = "DRY RUN / PAPER" if dry_run else "LIVE"
+        txt = (
+            f"Trader Started\nMode: {mode}\nTimeframe: {timeframe}\n"
+            f"Symbols: {', '.join(symbols)}\nRisk %: {risk_pct}%\nLeverage: {leverage}x"
+        )
+        try:
+            self.send(txt)
+        except Exception:
+            pass
+
+    def signal_detailed(self, symbol: str, direction: str, signal_type: str, price: float, entry_price: float, size: int, stop_price: float, risk_pct: float):
+        if not ON_SIGNAL:
+            return
+        txt = (
+            f"Signal\nSymbol: {symbol}\nDirection: {direction.upper()}\nType: {signal_type}\n"
+            f"Signal Price: {price:.2f}\nSuggested Entry: {entry_price:.2f}\nSize: {size}\nStop Price: {stop_price:.2f}\nRisk %: {risk_pct}%"
         )
         self.send(txt)
