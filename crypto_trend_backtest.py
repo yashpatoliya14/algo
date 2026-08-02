@@ -124,3 +124,14 @@ def fetch_ohlcv(exchange_id: str, symbol: str, timeframe: str, since_ms: int, un
     df = df[(df.index >= pd.to_datetime(since_ms, unit="ms", utc=True)) &
             (df.index <= pd.to_datetime(until_ms, unit="ms", utc=True))]
     return df
+
+
+def list_exchange_products(exchange_id: str) -> list:
+    """Return a list of product symbols from CCXT exchange (e.g., 'BTC/USDT')."""
+    try:
+        import ccxt
+        exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
+        markets = exchange.load_markets()
+        return list(markets.keys())
+    except Exception:
+        return []

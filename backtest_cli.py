@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from crypto_trend_backtest import fetch_ohlcv
+from crypto_trend_backtest import fetch_ohlcv, list_exchange_products
 from trend_rider_engine import (
     TrendRiderParams,
     run_trend_rider_backtest,
@@ -58,6 +58,14 @@ CACHE_DIR.mkdir(exist_ok=True)
 CAPITAL = 10_000.0
 SYMBOL = "BTC/USDT"
 EXCHANGE = "binance"
+
+# Load cache limits from env
+try:
+    CACHE_MAX_SIZE_MB = int(os.getenv("CACHE_MAX_SIZE_MB", "200"))
+    CACHE_MAX_AGE_DAYS = int(os.getenv("CACHE_MAX_AGE_DAYS", "90"))
+except Exception:
+    CACHE_MAX_SIZE_MB = 200
+    CACHE_MAX_AGE_DAYS = 90
 
 STRATEGY_DESC = (
     "Trend Rider v2 -- Supertrend(10,3) + EMA21/55 trend detection\n"
@@ -135,22 +143,49 @@ def fetch_year_data(year: int):
     return df4h
 
 
-def cache_path(year: int) -> Path:
-    return CACHE_DIR / f"rider_{year}.json"
+def cache_path(year: int, symbol: str = None) -> Path:
+    symbol = (symbol or SYMBOL).replace("/", "_")
+    return CACHE_DIR / f"rider_{symbol}_{year}.json"
+
+def prune_cache():
+    """Evict cache files older than max age or when total size exceeds limit."""
+    files = list(CACHE_DIR.glob("rider_*.json"))
+    now = datetime.now(timezone.utc)
+
+    # Evict by age first
+    for f in files:
+        try:
+            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
+            age_days = (now - mtime).days
+            if age_days > CACHE_MAX_AGE_DAYS:
+                f.unlink()
+        except Exception:
+            pass
+
+    # Evict by total size (oldest first)
+    files = sorted(list(CACHE_DIR.glob("rider_*.json")), key=lambda p: p.stat().st_mtime)
+    total_mb = sum(p.stat().st_size for p in files) / (1024 * 1024)
+    while total_mb > CACHE_MAX_SIZE_MB and files:
+        rm = files.pop(0)
+        try:
+            total_mb -= rm.stat().st_size / (1024 * 1024)
+            rm.unlink()
+        except Exception:
+            pass
 
 def year_complete(year: int) -> bool:
     return year < datetime.now(timezone.utc).year
 
-def load_cache(year: int):
-    p = cache_path(year)
+def load_cache(year: int, symbol: str = None):
+    p = cache_path(year, symbol)
     if not p.exists() or not year_complete(year):
         return None
     with open(p, "r") as f:
         return json.load(f)
 
-def save_cache(year: int, data: dict):
+def save_cache(year: int, data: dict, symbol: str = None):
     data["cached_at"] = datetime.now(timezone.utc).isoformat()
-    with open(cache_path(year), "w") as f:
+    with open(cache_path(year, symbol), "w") as f:
         json.dump(data, f)
 
 
@@ -287,7 +322,30 @@ def display(result, year, from_cache, elapsed):
 # ============================================================================
 
 def main():
+    global SYMBOL
     print_header()
+
+    # Prune cache on startup
+    prune_cache()
+
+    # Optionally allow selecting a symbol from Delta Exchange products
+    print(f"  {C.GRAY}Fetching available products from exchange...{C.RESET}")
+    try:
+        products = list_exchange_products(EXCHANGE)
+        symbols = sorted([p for p in products if "/" in p])
+    except Exception:
+        symbols = []
+
+    if symbols:
+        print(f"  {C.BOLD}Available symbols sample:{C.RESET} {', '.join(symbols[:12])} ...")
+        print(f"  Enter symbol in format 'BTC/USDT' or press Enter to use default ({SYMBOL})")
+        sinput = input(f"  {C.CYAN}>{C.RESET} Symbol: ").strip()
+        if sinput:
+            SYMBOL_OVERRIDE = sinput
+        else:
+            SYMBOL_OVERRIDE = SYMBOL
+    else:
+        SYMBOL_OVERRIDE = SYMBOL
 
     current_year = datetime.now().year
     years = list(range(2018, current_year + 1))
@@ -297,7 +355,7 @@ def main():
         print()
         line = "  "
         for y in years:
-            cached = cache_path(y).exists() and year_complete(y)
+            cached = cache_path(y, SYMBOL_OVERRIDE).exists() and year_complete(y)
             mark = f"{C.BLUE}*{C.RESET}" if cached else " "
             line += f"  {mark}{C.WHITE}{y}{C.RESET}"
         print(line)
@@ -327,15 +385,19 @@ def main():
 
         t0 = time.time()
 
-        cached_data = load_cache(year)
+        cached_data = load_cache(year, SYMBOL_OVERRIDE)
         if cached_data is not None:
             display(cached_data, year, True, time.time() - t0)
         else:
             print()
             try:
+                # run with symbol override by temporarily setting SYMBOL
+                old_sym = SYMBOL
+                SYMBOL = SYMBOL_OVERRIDE
                 result = run_year(year)
+                SYMBOL = old_sym
                 elapsed = time.time() - t0
-                save_cache(year, result)
+                save_cache(year, result, SYMBOL_OVERRIDE)
                 display(result, year, False, elapsed)
             except Exception as e:
                 print(f"  {C.RED}Error: {e}{C.RESET}\n")

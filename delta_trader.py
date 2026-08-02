@@ -33,6 +33,8 @@ from trend_rider_engine import (
     compute_indicators,
     supertrend_full,
 )
+from telegram_notifier import TelegramNotifier
+from symbol_utils import to_ccxt, to_delta
 
 # Load .env file if available
 try:
@@ -210,8 +212,15 @@ class DeltaTrader:
         self.api_key = os.getenv("DELTA_API_KEY", "")
         self.api_secret = os.getenv("DELTA_API_SECRET", "")
         self.base_url = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange")
-        self.symbol = os.getenv("SYMBOL", "BTCUSD")
+        # Accept SYMBOL in env as either 'BTC/USD' or 'BTCUSD'
+        env_symbol = os.getenv("SYMBOL", "BTCUSD")
         self.timeframe = os.getenv("TIMEFRAME", "4h")
+        try:
+            self.symbol_canonical = to_ccxt(env_symbol)
+            self.symbol = to_delta(self.symbol_canonical)
+        except Exception:
+            self.symbol_canonical = env_symbol
+            self.symbol = env_symbol
         self.risk_pct = float(os.getenv("RISK_PCT", "1.5"))
         self.leverage = int(os.getenv("LEVERAGE", "5"))
         self.dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -225,11 +234,14 @@ class DeltaTrader:
         )
 
         self.client = DeltaClient(self.api_key, self.api_secret, self.base_url)
+        self.notifier = TelegramNotifier()
 
         # State tracking
         self.active_position = None
         self.peak_price = None
         self.trail_stop_price = None
+        # symbols list will hold dicts: {"delta": <DELTA_SYM>, "canon": <BASE/QUOTE>}
+        self.symbols = []
 
     def print_banner(self):
         mode_str = "\033[93m[DRY RUN / PAPER TRADING]\033[0m" if self.dry_run else "\033[91m[LIVE REAL TRADING]\033[0m"
@@ -237,7 +249,7 @@ class DeltaTrader:
         print("=" * 65)
         print(f"   DELTA EXCHANGE LIVE TRADER -- 4H TREND RIDER {mode_str}")
         print("=" * 65)
-        print(f"  Symbol:                {self.symbol}")
+        print(f"  Symbol:                {self.symbol_canonical}")
         print(f"  Timeframe:             {self.timeframe}")
         print(f"  Risk Per Trade:        {self.risk_pct}%")
         print(f"  Leverage:              {self.leverage}x")
@@ -328,6 +340,10 @@ class DeltaTrader:
 
         if signal:
             print(f"  \033[92m[SIGNAL DETECTED]\033[0m Direction: {signal.upper()} | Type: {signal_type.upper()}")
+            try:
+                self.notifier.signal(self.symbol_canonical, signal, signal_type, float(curr_bar["close"]))
+            except Exception:
+                pass
         else:
             print("  No new signal on current closed 4H candle.")
 
@@ -392,6 +408,10 @@ class DeltaTrader:
                 "size": contracts,
                 "type": signal_type,
             }
+            try:
+                self.notifier.execution(self.symbol_canonical, direction, contracts, current_price, stop_price)
+            except Exception:
+                pass
         else:
             try:
                 # Set leverage
@@ -414,6 +434,10 @@ class DeltaTrader:
                     "size": contracts,
                     "type": signal_type,
                 }
+                try:
+                    self.notifier.execution(self.symbol_canonical, direction, contracts, current_price, stop_price)
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"  \033[91m[ORDER FAILED]\033[0m {e}")
 
@@ -445,6 +469,10 @@ class DeltaTrader:
                     self.client.cancel_all_orders(self.symbol)
                     self.client.place_order(self.symbol, pos["size"], "sell", "market_order")
                 self.active_position = None
+                try:
+                    self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
+                except Exception:
+                    pass
 
         else:  # Short position
             pos["peak_price"] = min(pos["peak_price"], current_price)
@@ -463,22 +491,61 @@ class DeltaTrader:
                     self.client.cancel_all_orders(self.symbol)
                     self.client.place_order(self.symbol, pos["size"], "buy", "market_order")
                 self.active_position = None
+                try:
+                    self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
+                except Exception:
+                    pass
 
     def start_loop(self):
-        """Continuous polling loop."""
+        """Continuous polling loop with interactive multi-symbol selection."""
+        # Interactive symbol selection
+        print()
+        print("Enter symbols to monitor (one per line). Type 'q' to finish. Press Enter with no input to use default symbol.")
+        symbols = []
+        try:
+            while True:
+                s = input("Symbol (or 'q' to finish): ").strip()
+                if s.lower() == 'q':
+                    break
+                if s == "":
+                    if not symbols:
+                        symbols = [self.symbol]
+                    break
+                symbols.append(s)
+        except (KeyboardInterrupt, EOFError):
+            print("\nSelection cancelled — using default symbol.")
+            symbols = [self.symbol]
+
+        if not symbols:
+            symbols = [self.symbol]
+
+        self.symbols = symbols
+
+        # Notify selected symbols
+        try:
+            self.notifier.send(f"Monitoring symbols: {', '.join(self.symbols)}")
+        except Exception:
+            pass
+
         self.print_banner()
-        print(f"Starting continuous polling loop (every {self.poll_interval}s)... Press Ctrl+C to stop.")
+        print(f"Starting continuous polling loop for {len(self.symbols)} symbols (every {self.poll_interval}s)... Press Ctrl+C to stop.")
 
-        while True:
-            try:
-                self.run_trading_cycle()
-            except KeyboardInterrupt:
-                print("\nStopping trader bot. Goodbye!")
-                break
-            except Exception as e:
-                print(f"Unexpected error in trading loop: {e}")
+        try:
+            while True:
+                for sym in self.symbols:
+                    try:
+                        # set current symbol and run a single check
+                        self.symbol = sym
+                        self.run_trading_cycle()
+                    except Exception as e:
+                        print(f"Unexpected error for {sym}: {e}")
+                    # small pause between symbols to reduce burst volume
+                    time.sleep(0.5)
 
-            time.sleep(self.poll_interval)
+                # wait until next full polling cycle
+                time.sleep(self.poll_interval)
+        except KeyboardInterrupt:
+            print("\nStopping trader bot. Goodbye!")
 
 
 # ============================================================================
