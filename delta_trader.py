@@ -258,22 +258,89 @@ class DeltaTrader:
         print("=" * 65)
         print()
 
+    def _fetch_candles_delta(self, limit: int, now_ts: int, start_ts: int) -> pd.DataFrame | None:
+        """Try fetching candles from Delta Exchange (priority 1)."""
+        try:
+            raw_candles = self.client.get_candles(self.symbol, self.timeframe, start_ts, now_ts)
+            if not raw_candles:
+                return None
+
+            df = pd.DataFrame(raw_candles)
+            df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
+            df = df.rename(columns={"open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"})
+            df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+            df = df.sort_values("ts").drop_duplicates("ts").set_index("ts")
+
+            if len(df) < 5:
+                return None
+            return df
+        except Exception as e:
+            print(f"  [WARN] Delta candle fetch failed: {e}")
+            return None
+
+    def _fetch_candles_binance(self, limit: int, now_ts: int, start_ts: int) -> pd.DataFrame | None:
+        """Fallback: fetch candles from Binance via ccxt."""
+        try:
+            import ccxt
+
+            # Map the symbol to Binance format (e.g. BTCUSD -> BTC/USDT)
+            binance_symbol = self.symbol_canonical
+            # Delta uses USD quote, Binance typically uses USDT
+            if binance_symbol.endswith("/USD"):
+                binance_symbol = binance_symbol + "T"  # BTC/USD -> BTC/USDT
+
+            exchange = ccxt.binance({"enableRateLimit": True})
+            since_ms = start_ts * 1000
+
+            all_rows = []
+            cursor = since_ms
+            until_ms = now_ts * 1000
+
+            while cursor < until_ms:
+                batch = exchange.fetch_ohlcv(binance_symbol, timeframe=self.timeframe, since=cursor, limit=1000)
+                if not batch:
+                    break
+                all_rows.extend(batch)
+                cursor = batch[-1][0] + 1
+                if len(batch) < 2:
+                    break
+                import time as _time
+                _time.sleep(exchange.rateLimit / 1000)
+
+            if not all_rows:
+                return None
+
+            df = pd.DataFrame(all_rows, columns=["ts", "open", "high", "low", "close", "volume"])
+            df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+            df = df.drop_duplicates("ts").set_index("ts")
+            df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+
+            if len(df) < 5:
+                return None
+            return df
+        except Exception as e:
+            print(f"  [WARN] Binance candle fetch failed: {e}")
+            return None
+
     def fetch_recent_candles(self, limit: int = 150) -> pd.DataFrame:
-        """Fetch 4H candles from Delta Exchange API."""
+        """Fetch candles with priority: Delta Exchange first, Binance fallback."""
         now_ts = int(time.time())
         start_ts = now_ts - (limit * 4 * 3600)
 
-        raw_candles = self.client.get_candles(self.symbol, self.timeframe, start_ts, now_ts)
-        if not raw_candles:
-            raise ValueError(f"No candles returned for {self.symbol} ({self.timeframe})")
+        # Priority 1: Delta Exchange
+        df = self._fetch_candles_delta(limit, now_ts, start_ts)
+        if df is not None:
+            print(f"  [DATA] Candles from Delta Exchange ({len(df)} bars)")
+            return df
 
-        # Delta candles format: [{"time": ..., "open": ..., "high": ..., "low": ..., "close": ..., "volume": ...}, ...]
-        df = pd.DataFrame(raw_candles)
-        df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
-        df = df.rename(columns={"open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"})
-        df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
-        df = df.sort_values("ts").drop_duplicates("ts").set_index("ts")
-        return df
+        # Fallback: Binance
+        print(f"  [DATA] Delta returned no data for {self.symbol}, trying Binance...")
+        df = self._fetch_candles_binance(limit, now_ts, start_ts)
+        if df is not None:
+            print(f"  [DATA] Candles from Binance fallback ({len(df)} bars)")
+            return df
+
+        raise ValueError(f"No candles from Delta or Binance for {self.symbol} ({self.timeframe})")
 
     def evaluate_signals(self, df: pd.DataFrame):
         """Evaluate Trend Rider signals on the latest completed candle."""

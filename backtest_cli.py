@@ -24,6 +24,7 @@ from trend_rider_engine import (
     run_trend_rider_backtest,
     get_metrics,
 )
+from symbol_utils import to_delta, to_ccxt
 
 # ============================================================================
 # TERMINAL COLORS
@@ -58,6 +59,7 @@ CACHE_DIR.mkdir(exist_ok=True)
 CAPITAL = 10_000.0
 SYMBOL = "BTC/USDT"
 EXCHANGE = "binance"
+DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange")
 
 # Load cache limits from env
 try:
@@ -128,17 +130,82 @@ def section(title, icon=""):
 # DATA FETCHING & CACHING
 # ============================================================================
 
+def _fetch_year_delta(year: int, symbol: str) -> pd.DataFrame | None:
+    """Try fetching candle data from Delta Exchange (priority 1, no auth needed)."""
+    try:
+        # Map CCXT symbol to Delta format: BTC/USDT -> BTCUSD
+        delta_sym = to_delta(symbol)
+    except Exception:
+        return None
+
+    try:
+        import requests
+
+        base_url = DELTA_BASE_URL.rstrip("/")
+        start_dt = datetime(year, 1, 1, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        end_dt = now if year >= now.year else datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+
+        start_ts = int(start_dt.timestamp())
+        end_ts = int(end_dt.timestamp())
+
+        all_candles = []
+        cursor = start_ts
+        resolution = "4h"
+
+        # Delta returns max ~500 candles per request, so paginate
+        while cursor < end_ts:
+            params = {"symbol": delta_sym, "resolution": resolution, "start": cursor, "end": end_ts}
+            resp = requests.get(f"{base_url}/v2/history/candles", params=params, timeout=15)
+            resp.raise_for_status()
+            batch = resp.json().get("result", [])
+            if not batch:
+                break
+            all_candles.extend(batch)
+            # Delta candles have "time" field in unix seconds
+            last_time = max(c["time"] for c in batch)
+            if last_time <= cursor:
+                break
+            cursor = last_time + 1
+            time.sleep(0.3)  # rate limit courtesy
+
+        if not all_candles:
+            return None
+
+        df = pd.DataFrame(all_candles)
+        df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+        df = df.sort_values("ts").drop_duplicates("ts").set_index("ts")
+
+        if len(df) < 50:
+            return None
+        return df
+    except Exception as e:
+        print(f"  {C.YELLOW}[Delta fetch failed: {e}]{C.RESET}")
+        return None
+
+
 def fetch_year_data(year: int):
+    """Fetch candle data: Delta Exchange (priority 1) → Binance (fallback)."""
     start = f"{year}-01-01"
     now = datetime.now(timezone.utc)
     end_dt = now if year >= now.year else datetime(year + 1, 1, 1, tzinfo=timezone.utc)
 
+    # Priority 1: Try Delta Exchange
+    print(f"  {C.GRAY}Trying Delta Exchange for {SYMBOL} 4H data ({year})...{C.RESET}", end="", flush=True)
+    df4h = _fetch_year_delta(year, SYMBOL)
+    if df4h is not None:
+        print(f" {C.GREEN}{len(df4h)} bars (Delta){C.RESET}")
+        return df4h
+
+    # Fallback: Binance
+    print(f" {C.YELLOW}no data{C.RESET}")
+    print(f"  {C.GRAY}Falling back to Binance for {SYMBOL} 4H data ({year})...{C.RESET}", end="", flush=True)
+
     since_ms = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
     until_ms = int(end_dt.timestamp() * 1000)
-
-    print(f"  {C.GRAY}Fetching {SYMBOL} 4H data for {year}...{C.RESET}", end="", flush=True)
     df4h = fetch_ohlcv(EXCHANGE, SYMBOL, "4h", since_ms, until_ms)
-    print(f" {C.GREEN}{len(df4h)} bars{C.RESET}")
+    print(f" {C.GREEN}{len(df4h)} bars (Binance){C.RESET}")
 
     return df4h
 
