@@ -37,7 +37,7 @@ from trend_rider_engine import (
     supertrend_full,
 )
 from telegram_notifier import TelegramNotifier
-from symbol_utils import to_ccxt, to_delta
+from symbol_utils import to_ccxt, to_delta, to_binance
 
 
 # ============================================================================
@@ -283,11 +283,8 @@ class DeltaTrader:
         try:
             import ccxt
 
-            # Map the symbol to Binance format (e.g. BTCUSD -> BTC/USDT)
-            binance_symbol = self.symbol_canonical
-            # Delta uses USD quote, Binance typically uses USDT
-            if binance_symbol.endswith("/USD"):
-                binance_symbol = binance_symbol + "T"  # BTC/USD -> BTC/USDT
+            # Map the symbol to Binance format (e.g. BTCUSD -> BTC/USDT, AVAXUSD -> AVAX/USDT)
+            binance_symbol = to_binance(self.symbol_canonical)
 
             exchange = ccxt.binance({"enableRateLimit": True})
             since_ms = start_ts * 1000
