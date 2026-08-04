@@ -232,14 +232,16 @@ class DeltaTrader:
         self.client = DeltaClient(self.api_key, self.api_secret, self.base_url)
         self.notifier = TelegramNotifier()
 
-        # State tracking
-        self.active_position = None
-        self.peak_price = None
-        self.trail_stop_price = None
+        # State tracking — per-symbol to avoid cross-symbol position bleed
+        # Keyed by delta symbol string (e.g. "BTCUSD")
+        self.active_positions: dict[str, dict] = {}
         # symbols list will hold dicts: {"delta": <DELTA_SYM>, "canon": <BASE/QUOTE>}
         self.symbols = []
-        # Track already-notified signals so we don't spam Telegram
-        self._notified_signals: set[str] = set()
+        # Track already-notified signals so we don't spam Telegram — per-symbol
+        self._notified_signals: dict[str, set[str]] = {}
+        # Cooldown: track the candle timestamp of last exit per symbol
+        # to enforce cooldown_bars gap before re-entry (matches backtest)
+        self._last_exit_candle_ts: dict[str, int] = {}
 
     def print_banner(self):
         mode_str = "\033[93m[DRY RUN / PAPER TRADING]\033[0m" if self.dry_run else "\033[91m[LIVE REAL TRADING]\033[0m"
@@ -368,22 +370,33 @@ class DeltaTrader:
                 print(f"  [WARN] Failed to fetch positions: {e}")
                 pos_size = 0
         else:
-            pos_size = self.active_position["size"] if self.active_position else 0
+            ap = self.active_positions.get(self.symbol)
+            pos_size = ap["size"] if ap else 0
 
         # Position Management & Dynamic Trailing Stop
-        if pos_size != 0 or self.active_position is not None:
+        active_pos = self.active_positions.get(self.symbol)
+        if pos_size != 0 or active_pos is not None:
             self._manage_active_position(curr_price, curr_bar)
         elif signal is not None:
-            # Duplicate signal guard: same candle + same signal = skip repeat
-            sig_key = self._signal_key(signal, signal_type, curr_bar)
-            if sig_key in self._notified_signals:
-                print(f"  Signal already processed for this candle, skipping. (key={sig_key})")
+            # Cooldown check: skip entry if we exited too recently (matches backtest)
+            curr_candle_ts = self._get_candle_ts(curr_bar)
+            last_exit_ts = self._last_exit_candle_ts.get(self.symbol, 0)
+            tf_seconds = self._timeframe_seconds()
+            bars_since_exit = (curr_candle_ts - last_exit_ts) // tf_seconds if tf_seconds > 0 and last_exit_ts > 0 else 999
+            if bars_since_exit < self.params.cooldown_bars:
+                print(f"  Cooldown active: {bars_since_exit} bars since last exit (need {self.params.cooldown_bars}), skipping.")
             else:
-                self._notified_signals.add(sig_key)
-                # Prune old keys to prevent memory leak (keep last 50)
-                if len(self._notified_signals) > 50:
-                    self._notified_signals = set(list(self._notified_signals)[-50:])
-                self._execute_entry(signal, signal_type, curr_bar, curr_price)
+                # Duplicate signal guard: same candle + same signal = skip repeat
+                sig_key = self._signal_key(signal, signal_type, curr_bar)
+                sym_signals = self._notified_signals.setdefault(self.symbol, set())
+                if sig_key in sym_signals:
+                    print(f"  Signal already processed for this candle, skipping. (key={sig_key})")
+                else:
+                    sym_signals.add(sig_key)
+                    # Prune old keys to prevent memory leak (keep last 50 per symbol)
+                    if len(sym_signals) > 50:
+                        self._notified_signals[self.symbol] = set(list(sym_signals)[-50:])
+                    self._execute_entry(signal, signal_type, curr_bar, curr_price)
 
     def _execute_entry(self, direction: str, signal_type: str, curr_bar, current_price: float):
         """Calculate size, place market order and initial stop loss."""
@@ -419,7 +432,7 @@ class DeltaTrader:
 
         if self.dry_run:
             print("  \033[93m[DRY RUN] Order simulated successfully!\033[0m")
-            self.active_position = {
+            self.active_positions[self.symbol] = {
                 "direction": direction,
                 "entry_price": current_price,
                 "stop_price": stop_price,
@@ -427,6 +440,7 @@ class DeltaTrader:
                 "peak_price": current_price,
                 "size": contracts,
                 "type": signal_type,
+                "init_risk": stop_dist,  # needed for R-multiple trailing (matches backtest)
             }
             try:
                 self.notifier.signal_detailed(
@@ -461,7 +475,7 @@ class DeltaTrader:
                 stop_res = self.client.place_order(self.symbol, contracts, exit_side, "stop_market_order", stop_price=stop_price)
                 print(f"  [LIVE ORDER] Stop Loss Placed: {stop_res.get('id')}")
 
-                self.active_position = {
+                self.active_positions[self.symbol] = {
                     "direction": direction,
                     "entry_price": current_price,
                     "stop_price": stop_price,
@@ -469,6 +483,7 @@ class DeltaTrader:
                     "peak_price": current_price,
                     "size": contracts,
                     "type": signal_type,
+                    "init_risk": stop_dist,  # needed for R-multiple trailing (matches backtest)
                 }
                 try:
                     self.notifier.signal_detailed(
@@ -493,56 +508,145 @@ class DeltaTrader:
             except Exception as e:
                 print(f"  \033[91m[ORDER FAILED]\033[0m {e}")
 
+    def _get_candle_ts(self, curr_bar) -> int:
+        """Extract integer timestamp from a candle bar (used for cooldown tracking)."""
+        candle_time = getattr(curr_bar, "name", None)
+        if hasattr(candle_time, "timestamp"):
+            return int(candle_time.timestamp())
+        return int(time.time())
+
+    def _timeframe_seconds(self) -> int:
+        """Convert self.timeframe string (e.g. '4h', '1h', '15m') to seconds."""
+        tf = self.timeframe.strip().lower()
+        if tf.endswith("h"):
+            return int(tf[:-1]) * 3600
+        elif tf.endswith("m"):
+            return int(tf[:-1]) * 60
+        elif tf.endswith("d"):
+            return int(tf[:-1]) * 86400
+        return 14400  # default 4h
+
     def _manage_active_position(self, current_price: float, curr_bar):
-        """Update trailing stop when price moves 1% in profit -> trail 0.4%."""
-        pos = self.active_position
+        """Full exit management matching backtest engine exactly:
+        - Percentage trailing: 1% activation → 0.4% trail
+        - R-multiple phases: 1R→BE, 2R→chandelier 2.5×ATR, 4R→chandelier 1.8×ATR
+        - Supertrend value as trail floor/ceiling
+        - Supertrend reversal exit
+        """
+        pos = self.active_positions.get(self.symbol)
         if not pos:
             return
 
         direction = pos["direction"]
         entry_px = pos["entry_price"]
+        init_risk = pos.get("init_risk", pos["stop_price"] and abs(entry_px - pos["stop_price"]) or 1.0)
+        atr_val = curr_bar["atr"]
 
         if direction == "long":
-            pos["peak_price"] = max(pos["peak_price"], current_price)
+            pos["peak_price"] = max(pos["peak_price"], curr_bar["high"])
+            r_now = (curr_bar["close"] - entry_px) / init_risk if init_risk > 0 else 0
+
+            # --- Percentage trailing stop (1% → 0.4%) ---
             pct_move = (pos["peak_price"] - entry_px) / entry_px * 100.0
-
-            # 1% activation -> 0.4% trailing stop
             if pct_move >= self.params.trail_pct_activation:
-                new_trail = pos["peak_price"] * (1.0 - self.params.trail_pct_distance / 100.0)
-                if new_trail > pos["trail_stop"]:
-                    print(f"  \033[92m[TRAILING STOP TIGHTENED]\033[0m Peak: ${pos['peak_price']:,.2f} (+{pct_move:.2f}%) | Trail Stop: ${new_trail:,.2f}")
-                    pos["trail_stop"] = new_trail
+                pct_stop = pos["peak_price"] * (1.0 - self.params.trail_pct_distance / 100.0)
+                if pct_stop > pos["trail_stop"]:
+                    pos["trail_stop"] = pct_stop
 
-            # Exit check
-            if current_price <= pos["trail_stop"]:
-                pnl = (pos["trail_stop"] - entry_px) * pos["size"]
-                print(f"  \033[91m[POSITION CLOSED]\033[0m Trailing stop hit at ${current_price:,.2f} | PnL: ${pnl:+,.2f}")
+            # --- R-multiple phased trailing (matches backtest) ---
+            if r_now >= 1.0 and r_now < 2.0:
+                be = entry_px + self.params.trail_be_buffer * atr_val
+                if be > pos["trail_stop"]:
+                    pos["trail_stop"] = be
+            elif r_now >= 2.0 and r_now < 4.0:
+                chand = pos["peak_price"] - self.params.trail_phase2_mult * atr_val
+                if chand > pos["trail_stop"]:
+                    pos["trail_stop"] = chand
+            elif r_now >= 4.0:
+                chand = pos["peak_price"] - self.params.trail_phase3_mult * atr_val
+                if chand > pos["trail_stop"]:
+                    pos["trail_stop"] = chand
+
+            # --- Supertrend value as trail floor ---
+            st_val = curr_bar.get("st_val", None)
+            if st_val is not None and not (isinstance(st_val, float) and np.isnan(st_val)):
+                if st_val > pos["trail_stop"]:
+                    pos["trail_stop"] = st_val
+
+            old_trail = pos.get("_prev_trail", pos["stop_price"])
+            if pos["trail_stop"] != old_trail:
+                print(f"  \033[92m[TRAILING STOP UPDATED]\033[0m R={r_now:.1f} | Peak: ${pos['peak_price']:,.2f} | Trail: ${pos['trail_stop']:,.2f}")
+            pos["_prev_trail"] = pos["trail_stop"]
+
+            # --- Exit checks ---
+            stop_hit = current_price <= pos["trail_stop"]
+            st_reversed = curr_bar.get("st_dir", 1) == -1
+
+            if stop_hit or st_reversed:
+                exit_price = pos["trail_stop"] if stop_hit else current_price
+                reason = "trail_stop" if stop_hit else "st_reversed"
+                pnl = (exit_price - entry_px) * pos["size"]
+                print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
                 if not self.dry_run:
                     self.client.cancel_all_orders(self.symbol)
                     self.client.place_order(self.symbol, pos["size"], "sell", "market_order")
-                self.active_position = None
+                self.active_positions.pop(self.symbol, None)
+                self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 try:
                     self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
                 except Exception:
                     pass
 
         else:  # Short position
-            pos["peak_price"] = min(pos["peak_price"], current_price)
+            pos["peak_price"] = min(pos["peak_price"], curr_bar["low"])
+            r_now = (entry_px - curr_bar["close"]) / init_risk if init_risk > 0 else 0
+
+            # --- Percentage trailing stop (1% → 0.4%) ---
             pct_move = (entry_px - pos["peak_price"]) / entry_px * 100.0
-
             if pct_move >= self.params.trail_pct_activation:
-                new_trail = pos["peak_price"] * (1.0 + self.params.trail_pct_distance / 100.0)
-                if new_trail < pos["trail_stop"]:
-                    print(f"  \033[92m[TRAILING STOP TIGHTENED]\033[0m Peak: ${pos['peak_price']:,.2f} (+{pct_move:.2f}%) | Trail Stop: ${new_trail:,.2f}")
-                    pos["trail_stop"] = new_trail
+                pct_stop = pos["peak_price"] * (1.0 + self.params.trail_pct_distance / 100.0)
+                if pct_stop < pos["trail_stop"]:
+                    pos["trail_stop"] = pct_stop
 
-            if current_price >= pos["trail_stop"]:
-                pnl = (entry_px - pos["trail_stop"]) * pos["size"]
-                print(f"  \033[91m[POSITION CLOSED]\033[0m Trailing stop hit at ${current_price:,.2f} | PnL: ${pnl:+,.2f}")
+            # --- R-multiple phased trailing (matches backtest) ---
+            if r_now >= 1.0 and r_now < 2.0:
+                be = entry_px - self.params.trail_be_buffer * atr_val
+                if be < pos["trail_stop"]:
+                    pos["trail_stop"] = be
+            elif r_now >= 2.0 and r_now < 4.0:
+                chand = pos["peak_price"] + self.params.trail_phase2_mult * atr_val
+                if chand < pos["trail_stop"]:
+                    pos["trail_stop"] = chand
+            elif r_now >= 4.0:
+                chand = pos["peak_price"] + self.params.trail_phase3_mult * atr_val
+                if chand < pos["trail_stop"]:
+                    pos["trail_stop"] = chand
+
+            # --- Supertrend value as trail ceiling ---
+            st_val = curr_bar.get("st_val", None)
+            if st_val is not None and not (isinstance(st_val, float) and np.isnan(st_val)):
+                if st_val < pos["trail_stop"]:
+                    pos["trail_stop"] = st_val
+
+            old_trail = pos.get("_prev_trail", pos["stop_price"])
+            if pos["trail_stop"] != old_trail:
+                print(f"  \033[92m[TRAILING STOP UPDATED]\033[0m R={r_now:.1f} | Peak: ${pos['peak_price']:,.2f} | Trail: ${pos['trail_stop']:,.2f}")
+            pos["_prev_trail"] = pos["trail_stop"]
+
+            # --- Exit checks ---
+            stop_hit = current_price >= pos["trail_stop"]
+            st_reversed = curr_bar.get("st_dir", -1) == 1
+
+            if stop_hit or st_reversed:
+                exit_price = pos["trail_stop"] if stop_hit else current_price
+                reason = "trail_stop" if stop_hit else "st_reversed"
+                pnl = (entry_px - exit_price) * pos["size"]
+                print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
                 if not self.dry_run:
                     self.client.cancel_all_orders(self.symbol)
                     self.client.place_order(self.symbol, pos["size"], "buy", "market_order")
-                self.active_position = None
+                self.active_positions.pop(self.symbol, None)
+                self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 try:
                     self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
                 except Exception:
