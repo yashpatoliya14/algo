@@ -24,7 +24,7 @@ from trend_rider_engine import (
     run_trend_rider_backtest,
     get_metrics,
 )
-from symbol_utils import to_delta, to_ccxt
+from symbol_utils import to_delta, to_ccxt, to_binance
 
 # ============================================================================
 # TERMINAL COLORS
@@ -408,7 +408,11 @@ def main():
         print(f"  Enter symbol in format 'BTC/USDT' or press Enter to use default ({SYMBOL})")
         sinput = input(f"  {C.CYAN}>{C.RESET} Symbol: ").strip()
         if sinput:
-            SYMBOL_OVERRIDE = sinput
+            try:
+                SYMBOL_OVERRIDE = to_binance(sinput)
+            except Exception:
+                print(f"  {C.RED}Invalid symbol format: {sinput}. Using default {SYMBOL}{C.RESET}")
+                SYMBOL_OVERRIDE = SYMBOL
         else:
             SYMBOL_OVERRIDE = SYMBOL
     else:

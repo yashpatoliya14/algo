@@ -232,16 +232,34 @@ class DeltaTrader:
         self.client = DeltaClient(self.api_key, self.api_secret, self.base_url)
         self.notifier = TelegramNotifier()
 
-        # State tracking — per-symbol to avoid cross-symbol position bleed
-        # Keyed by delta symbol string (e.g. "BTCUSD")
-        self.active_positions: dict[str, dict] = {}
+        # State tracking
+        self.positions: dict[str, dict] = {}          # keyed by symbol_canonical
+        self._notified_signals_by_symbol: dict[str, set[str]] = {}  # keyed by symbol_canonical
         # symbols list will hold dicts: {"delta": <DELTA_SYM>, "canon": <BASE/QUOTE>}
         self.symbols = []
-        # Track already-notified signals so we don't spam Telegram — per-symbol
-        self._notified_signals: dict[str, set[str]] = {}
         # Cooldown: track the candle timestamp of last exit per symbol
         # to enforce cooldown_bars gap before re-entry (matches backtest)
         self._last_exit_candle_ts: dict[str, int] = {}
+
+    @property
+    def active_position(self):
+        """Active position for the symbol currently being processed."""
+        return self.positions.get(self.symbol_canonical)
+
+    @active_position.setter
+    def active_position(self, value):
+        if value is None:
+            self.positions.pop(self.symbol_canonical, None)
+        else:
+            self.positions[self.symbol_canonical] = value
+
+    @property
+    def _notified_signals(self):
+        return self._notified_signals_by_symbol.setdefault(self.symbol_canonical, set())
+
+    @_notified_signals.setter
+    def _notified_signals(self, value):
+        self._notified_signals_by_symbol[self.symbol_canonical] = value
 
     def print_banner(self):
         mode_str = "\033[93m[DRY RUN / PAPER TRADING]\033[0m" if self.dry_run else "\033[91m[LIVE REAL TRADING]\033[0m"
@@ -434,12 +452,10 @@ class DeltaTrader:
                 print(f"  [WARN] Failed to fetch positions: {e}")
                 pos_size = 0
         else:
-            ap = self.active_positions.get(self.symbol)
-            pos_size = ap["size"] if ap else 0
+            pos_size = self.active_position["size"] if self.active_position else 0
 
         # Position Management & Dynamic Trailing Stop
-        active_pos = self.active_positions.get(self.symbol)
-        if pos_size != 0 or active_pos is not None:
+        if pos_size != 0 or self.active_position is not None:
             self._manage_active_position(curr_price, curr_bar)
         elif signal is not None:
             # Cooldown check: skip entry if we exited too recently (matches backtest)
@@ -452,14 +468,13 @@ class DeltaTrader:
             else:
                 # Duplicate signal guard: same candle + same signal = skip repeat
                 sig_key = self._signal_key(signal, signal_type, curr_bar)
-                sym_signals = self._notified_signals.setdefault(self.symbol, set())
-                if sig_key in sym_signals:
+                if sig_key in self._notified_signals:
                     print(f"  Signal already processed for this candle, skipping. (key={sig_key})")
                 else:
-                    sym_signals.add(sig_key)
+                    self._notified_signals.add(sig_key)
                     # Prune old keys to prevent memory leak (keep last 50 per symbol)
-                    if len(sym_signals) > 50:
-                        self._notified_signals[self.symbol] = set(list(sym_signals)[-50:])
+                    if len(self._notified_signals) > 50:
+                        self._notified_signals = set(list(self._notified_signals)[-50:])
                     self._execute_entry(signal, signal_type, curr_bar, curr_price)
 
     def _execute_entry(self, direction: str, signal_type: str, curr_bar, current_price: float):
@@ -496,7 +511,7 @@ class DeltaTrader:
 
         if self.dry_run:
             print("  \033[93m[DRY RUN] Order simulated successfully!\033[0m")
-            self.active_positions[self.symbol] = {
+            self.active_position = {
                 "direction": direction,
                 "entry_price": current_price,
                 "stop_price": stop_price,
@@ -539,7 +554,7 @@ class DeltaTrader:
                 stop_res = self.client.place_order(self.symbol, contracts, exit_side, "stop_market_order", stop_price=stop_price)
                 print(f"  [LIVE ORDER] Stop Loss Placed: {stop_res.get('id')}")
 
-                self.active_positions[self.symbol] = {
+                self.active_position = {
                     "direction": direction,
                     "entry_price": current_price,
                     "stop_price": stop_price,
@@ -597,7 +612,7 @@ class DeltaTrader:
         - Supertrend value as trail floor/ceiling
         - Supertrend reversal exit
         """
-        pos = self.active_positions.get(self.symbol)
+        pos = self.active_position
         if not pos:
             return
 
@@ -654,7 +669,7 @@ class DeltaTrader:
                 if not self.dry_run:
                     self.client.cancel_all_orders(self.symbol)
                     self.client.place_order(self.symbol, pos["size"], "sell", "market_order")
-                self.active_positions.pop(self.symbol, None)
+                self.active_position = None
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 try:
                     self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
@@ -709,7 +724,7 @@ class DeltaTrader:
                 if not self.dry_run:
                     self.client.cancel_all_orders(self.symbol)
                     self.client.place_order(self.symbol, pos["size"], "buy", "market_order")
-                self.active_positions.pop(self.symbol, None)
+                self.active_position = None
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 try:
                     self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
