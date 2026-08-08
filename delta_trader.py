@@ -158,6 +158,11 @@ class DeltaClient:
         res = self._request("GET", f"/v2/tickers/{symbol}", auth=False)
         return res.get("result", {})
 
+    def get_products(self) -> list:
+        """Fetch all product configurations (contract sizes, tick sizes, etc.)."""
+        res = self._request("GET", "/v2/products", auth=False)
+        return res.get("result", [])
+
     # Private Endpoints
     def get_balances(self) -> list:
         """Fetch wallet balances."""
@@ -219,6 +224,7 @@ class DeltaTrader:
             self.symbol = env_symbol
         self.risk_pct = float(os.getenv("RISK_PCT", "1.5"))
         self.leverage = int(os.getenv("LEVERAGE", "5"))
+        self.fixed_margin_usd = float(os.getenv("FIXED_MARGIN_USD", "0"))
         self.dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
         self.poll_interval = int(os.getenv("POLL_INTERVAL_SEC", "60"))
 
@@ -231,6 +237,16 @@ class DeltaTrader:
 
         self.client = DeltaClient(self.api_key, self.api_secret, self.base_url)
         self.notifier = TelegramNotifier()
+        
+        # Load contract specs for precise sizing
+        self.contract_values = {}
+        try:
+            products = self.client.get_products()
+            for p in products:
+                if "symbol" in p and "contract_value" in p:
+                    self.contract_values[p["symbol"]] = float(p["contract_value"])
+        except Exception as e:
+            print(f"[WARN] Failed to load contract specs from Delta API: {e}")
 
         # State tracking
         self.positions: dict[str, dict] = {}          # keyed by symbol_canonical
@@ -495,12 +511,32 @@ class DeltaTrader:
             try:
                 balances = self.client.get_balances()
                 if balances:
-                    equity = float(balances[0].get("balance", 10000.0))
+                    # Look for USDT or USD balance first
+                    quote_bal = next((b for b in balances if b.get("asset_symbol") in ["USDT", "USD"]), None)
+                    if quote_bal:
+                        equity = float(quote_bal.get("balance", 10000.0))
+                    else:
+                        equity = float(balances[0].get("balance", 10000.0))
             except Exception as e:
                 print(f"  [WARN] Could not fetch balance, using default: {e}")
 
-        risk_amount = equity * (self.risk_pct / 100.0)
-        contracts = max(1, int(risk_amount / stop_dist))
+        split_balance_margin = os.getenv("SPLIT_BALANCE_MARGIN", "true").lower() == "true"
+
+        if split_balance_margin:
+            num_coins = max(1, len(self.symbols))
+            margin_per_coin = equity / num_coins
+            notional = margin_per_coin * self.leverage
+            # Get actual contract multiplier from delta API (default to 0.001 if missing)
+            contract_val = self.contract_values.get(self.symbol, 0.001)
+            contracts = max(1, int(notional / (current_price * contract_val)))
+        elif self.fixed_margin_usd > 0:
+            notional = self.fixed_margin_usd * self.leverage
+            contract_val = self.contract_values.get(self.symbol, 0.001)
+            contracts = max(1, int(notional / (current_price * contract_val)))
+        else:
+            risk_amount = equity * (self.risk_pct / 100.0)
+            # Legacy simple logic
+            contracts = max(1, int(risk_amount / stop_dist))
 
         print(f"\n  \033[96m>>> EXECUTING ENTRY <<<\033[0m")
         print(f"  Direction:   {direction.upper()}")
