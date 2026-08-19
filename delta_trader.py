@@ -652,6 +652,7 @@ class DeltaTrader:
                         pass
             except Exception as e:
                 print(f"  \033[91m[ORDER FAILED]\033[0m {e}")
+                raise  # Re-raise so run_trading_cycle knows the entry failed
 
     def _get_candle_ts(self, curr_bar) -> int:
         """Extract integer timestamp from a candle bar (used for cooldown tracking)."""
