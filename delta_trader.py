@@ -163,6 +163,14 @@ class DeltaClient:
         res = self._request("GET", "/v2/products", auth=False)
         return res.get("result", [])
 
+    def get_product_symbols(self) -> set:
+        """Return set of all valid product symbols on the exchange."""
+        try:
+            products = self.get_products()
+            return {p["symbol"] for p in products if "symbol" in p}
+        except Exception:
+            return set()
+
     # Private Endpoints
     def get_balances(self) -> list:
         """Fetch wallet balances."""
@@ -440,32 +448,49 @@ class DeltaTrader:
     def run_trading_cycle(self):
         """Single poll & trading check cycle."""
         timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        print(f"[{timestamp_str}] Checking market & signals...")
+        print(f"[{timestamp_str}] [{self.symbol_canonical}] Checking market & signals...")
 
         try:
             df = self.fetch_recent_candles(limit=100)
+        except Exception as e:
+            print(f"  [{self.symbol_canonical}] [ERROR] Failed to fetch candle data: {e}")
+            print(f"  [{self.symbol_canonical}] Skipping this symbol for this cycle.")
+            return
+
+        try:
             ticker = self.client.get_ticker(self.symbol)
             curr_price = float(ticker.get("mark_price", df["close"].iloc[-1]))
         except Exception as e:
-            print(f"  [ERROR] Failed to fetch market data: {e}")
-            return
+            print(f"  [{self.symbol_canonical}] [WARN] Ticker fetch failed, using last candle close: {e}")
+            curr_price = float(df["close"].iloc[-1])
 
         signal, signal_type, curr_bar = self.evaluate_signals(df)
 
-        print(f"  Current Price: ${curr_price:,.2f} | 4H Bar Close: ${curr_bar['close']:,.2f}")
-        print(f"  EMA21: ${curr_bar['ema_fast']:,.2f} | Supertrend: {curr_bar['st_dir']} ({'BULL' if curr_bar['st_dir'] == 1 else 'BEAR'})")
+        if curr_bar is None:
+            print(f"  [{self.symbol_canonical}] [WARN] Not enough data for indicator computation, skipping.")
+            return
 
-        if not signal:
-            print("  No new signal on current closed 4H candle.")
+        print(f"  [{self.symbol_canonical}] Price: ${curr_price:,.2f} | 4H Close: ${curr_bar['close']:,.2f} | EMA21: ${curr_bar['ema_fast']:,.2f} | ST: {'BULL' if curr_bar['st_dir'] == 1 else 'BEAR'}")
 
-        # Check existing active position
+        if signal:
+            print(f"  [{self.symbol_canonical}] \033[96m>>> SIGNAL DETECTED: {signal.upper()} {signal_type} <<<\033[0m")
+        else:
+            print(f"  [{self.symbol_canonical}] No signal on current closed 4H candle.")
+
+        # Check existing active position — FILTER BY CURRENT SYMBOL
         if not self.dry_run:
             try:
                 positions = self.client.get_positions(self.symbol)
-                pos = positions[0] if positions else None
+                # Filter to only the position matching our current symbol
+                pos = None
+                for p in positions:
+                    p_symbol = p.get("product_symbol", p.get("symbol", ""))
+                    if p_symbol == self.symbol:
+                        pos = p
+                        break
                 pos_size = float(pos.get("size", 0)) if pos else 0
             except Exception as e:
-                print(f"  [WARN] Failed to fetch positions: {e}")
+                print(f"  [{self.symbol_canonical}] [WARN] Failed to fetch positions: {e}")
                 pos_size = 0
         else:
             pos_size = self.active_position["size"] if self.active_position else 0
@@ -480,18 +505,23 @@ class DeltaTrader:
             tf_seconds = self._timeframe_seconds()
             bars_since_exit = (curr_candle_ts - last_exit_ts) // tf_seconds if tf_seconds > 0 and last_exit_ts > 0 else 999
             if bars_since_exit < self.params.cooldown_bars:
-                print(f"  Cooldown active: {bars_since_exit} bars since last exit (need {self.params.cooldown_bars}), skipping.")
+                print(f"  [{self.symbol_canonical}] Cooldown active: {bars_since_exit} bars since last exit (need {self.params.cooldown_bars}), skipping.")
             else:
                 # Duplicate signal guard: same candle + same signal = skip repeat
                 sig_key = self._signal_key(signal, signal_type, curr_bar)
                 if sig_key in self._notified_signals:
-                    print(f"  Signal already processed for this candle, skipping. (key={sig_key})")
+                    print(f"  [{self.symbol_canonical}] Signal already processed for this candle, skipping.")
                 else:
-                    self._notified_signals.add(sig_key)
-                    # Prune old keys to prevent memory leak (keep last 50 per symbol)
-                    if len(self._notified_signals) > 50:
-                        self._notified_signals = set(list(self._notified_signals)[-50:])
-                    self._execute_entry(signal, signal_type, curr_bar, curr_price)
+                    # Attempt entry — only mark as processed if successful
+                    try:
+                        self._execute_entry(signal, signal_type, curr_bar, curr_price)
+                        # Mark signal as processed ONLY after successful execution
+                        self._notified_signals.add(sig_key)
+                        # Prune old keys to prevent memory leak (keep last 50 per symbol)
+                        if len(self._notified_signals) > 50:
+                            self._notified_signals = set(list(self._notified_signals)[-50:])
+                    except Exception as e:
+                        print(f"  [{self.symbol_canonical}] \033[91m[ENTRY FAILED]\033[0m {e} — will retry on next poll.")
 
     def _execute_entry(self, direction: str, signal_type: str, curr_bar, current_price: float):
         """Calculate size, place market order and initial stop loss."""
@@ -767,6 +797,23 @@ class DeltaTrader:
                 except Exception:
                     pass
 
+    def _validate_symbols(self, selected: list) -> list:
+        """Validate that each symbol exists on Delta Exchange. Remove invalid ones."""
+        valid = []
+        try:
+            available = self.client.get_product_symbols()
+        except Exception:
+            print("  [WARN] Could not fetch product list for validation, using all symbols.")
+            return selected
+
+        for sym in selected:
+            if sym["delta"] in available:
+                valid.append(sym)
+            else:
+                print(f"  \033[93m[SKIP]\033[0m {sym['canon']} ({sym['delta']}) — NOT FOUND on Delta Exchange. Removing from watchlist.")
+
+        return valid
+
     def start_loop(self):
         """Continuous polling loop using only environment `SYMBOLS` or `SYMBOL` (no terminal input)."""
         print()
@@ -811,6 +858,12 @@ class DeltaTrader:
             print("No valid symbols parsed from environment — using default symbol.")
             selected = [{"delta": self.symbol, "canon": self.symbol_canonical}]
 
+        # Validate symbols exist on exchange at startup
+        selected = self._validate_symbols(selected)
+        if not selected:
+            print("\033[91m[FATAL] No valid symbols found on Delta Exchange! Check your SYMBOLS in .env.\033[0m")
+            sys.exit(1)
+
         self.symbols = selected
 
         # Notify selected symbols (use canonical forms)
@@ -822,9 +875,17 @@ class DeltaTrader:
 
         self.print_banner()
         print(f"Starting continuous polling loop for {len(self.symbols)} symbols (every {self.poll_interval}s)... Press Ctrl+C to stop.")
+        print(f"Tracking: {', '.join(s['canon'] for s in self.symbols)}")
+        cycle_count = 0
 
         try:
             while True:
+                cycle_count += 1
+                cycle_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                print(f"\n{'─'*65}")
+                print(f"  Cycle #{cycle_count} | {cycle_ts} | {len(self.symbols)} symbols")
+                print(f"{'─'*65}")
+
                 for sym in self.symbols:
                     try:
                         # set current symbol and run a single check
@@ -832,7 +893,9 @@ class DeltaTrader:
                         self.symbol_canonical = sym["canon"]
                         self.run_trading_cycle()
                     except Exception as e:
-                        print(f"Unexpected error for {sym['canon']}: {e}")
+                        print(f"  [{sym['canon']}] \033[91mUnexpected error:\033[0m {e}")
+                        import traceback
+                        traceback.print_exc()
                     # small pause between symbols to reduce burst volume
                     time.sleep(0.5)
 
