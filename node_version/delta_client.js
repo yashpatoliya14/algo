@@ -203,7 +203,7 @@ class DeltaClient {
    */
   async setLeverage(symbol, leverage) {
     const payload = { product_symbol: symbol, leverage: String(leverage) };
-    return this._request('POST', '/v2/products/leverage', { payload, auth: true });
+    return this._request('POST', '/v2/orders/leverage', { payload, auth: true });
   }
 
   /**

@@ -186,7 +186,7 @@ class DeltaClient:
     def set_leverage(self, symbol: str, leverage: int) -> dict:
         """Set position leverage."""
         payload = {"product_symbol": symbol, "leverage": str(leverage)}
-        return self._request("POST", "/v2/products/leverage", payload=payload, auth=True)
+        return self._request("POST", "/v2/orders/leverage", payload=payload, auth=True)
 
     def place_order(self, symbol: str, size: int, side: str, order_type: str = "market_order", stop_price: float = None) -> dict:
         """
