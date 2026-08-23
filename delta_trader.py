@@ -271,6 +271,124 @@ class DeltaTrader:
         # to enforce cooldown_bars gap before re-entry (matches backtest)
         self._last_exit_candle_ts: dict[str, int] = {}
 
+        # State persistence file
+        self.state_file = Path(os.path.dirname(os.path.abspath(__file__))) / "trader_state.json"
+        self.load_state()
+
+    def save_state(self):
+        try:
+            # Convert notified signals set to list for JSON serialization
+            serializable_signals = {
+                sym: list(signals) for sym, signals in self._notified_signals_by_symbol.items()
+            }
+            state = {
+                "positions": self.positions,
+                "notified_signals": serializable_signals,
+                "last_exit_candle_ts": self._last_exit_candle_ts
+            }
+            with open(self.state_file, "w") as f:
+                json.dump(state, f, indent=4)
+        except Exception as e:
+            print(f"  [WARN] Failed to save state to disk: {e}")
+
+    def load_state(self):
+        if not self.state_file.exists():
+            return
+        try:
+            with open(self.state_file, "r") as f:
+                state = json.load(f)
+            
+            self.positions = state.get("positions", {})
+            
+            # Restore notified signals set
+            raw_signals = state.get("notified_signals", {})
+            for sym, signals in raw_signals.items():
+                self._notified_signals_by_symbol[sym] = set(signals)
+                
+            self._last_exit_candle_ts = state.get("last_exit_candle_ts", {})
+            print(f"  [STATE] Successfully loaded state from {self.state_file}")
+        except Exception as e:
+            print(f"  [WARN] Failed to load state from disk: {e}")
+
+    def reconcile_positions(self):
+        """Reconcile local state with open positions on Delta Exchange."""
+        if self.dry_run:
+            return
+
+        print("\n  [STATE] Reconciling positions with Delta Exchange...")
+        try:
+            # Fetch all open positions
+            positions = self.client.get_positions()
+            
+            # Map positions by symbol
+            exchange_positions = {}
+            for p in positions:
+                p_symbol = p.get("product_symbol", p.get("symbol", ""))
+                if p_symbol:
+                    exchange_positions[p_symbol] = p
+            
+            state_changed = False
+            
+            for sym_info in self.symbols:
+                delta_sym = sym_info["delta"]
+                canon_sym = sym_info["canon"]
+                
+                # Check if position exists on exchange
+                pos = exchange_positions.get(delta_sym)
+                exchange_size = float(pos.get("size", 0)) if pos else 0
+                
+                local_pos = self.positions.get(canon_sym)
+                
+                if exchange_size != 0:
+                    exchange_direction = "long" if exchange_size > 0 else "short"
+                    exchange_entry_px = float(pos.get("entry_price", 0))
+                    
+                    if local_pos:
+                        # Local state exists, verify matches
+                        local_direction = local_pos.get("direction")
+                        local_size = local_pos.get("size", 0)
+                        
+                        if local_direction != exchange_direction or abs(local_size - abs(exchange_size)) > 0.0001:
+                            print(f"  [{canon_sym}] [WARN] Local position mismatch (Local: {local_direction} {local_size}, Exchange: {exchange_direction} {abs(exchange_size)}). Reconstructing state...")
+                            self.positions[canon_sym] = {
+                                "direction": exchange_direction,
+                                "entry_price": exchange_entry_px,
+                                "stop_price": exchange_entry_px * 0.95 if exchange_direction == "long" else exchange_entry_px * 1.05,
+                                "trail_stop": exchange_entry_px * 0.95 if exchange_direction == "long" else exchange_entry_px * 1.05,
+                                "peak_price": exchange_entry_px,
+                                "size": abs(exchange_size),
+                                "type": "recovered",
+                                "init_risk": exchange_entry_px * 0.05
+                            }
+                            state_changed = True
+                    else:
+                        # Position exists on exchange but no local state. Reconstruct!
+                        print(f"  [{canon_sym}] [WARN] Active position of {abs(exchange_size)} found on exchange but not in local state. Reconstructing...")
+                        self.positions[canon_sym] = {
+                            "direction": exchange_direction,
+                            "entry_price": exchange_entry_px,
+                            "stop_price": exchange_entry_px * 0.95 if exchange_direction == "long" else exchange_entry_px * 1.05,
+                            "trail_stop": exchange_entry_px * 0.95 if exchange_direction == "long" else exchange_entry_px * 1.05,
+                            "peak_price": exchange_entry_px,
+                            "size": abs(exchange_size),
+                            "type": "recovered",
+                            "init_risk": exchange_entry_px * 0.05
+                        }
+                        state_changed = True
+                else:
+                    # No position on exchange
+                    if local_pos:
+                        print(f"  [{canon_sym}] [WARN] Local state has active position but none found on exchange. Clearing local position.")
+                        self.positions.pop(canon_sym, None)
+                        state_changed = True
+            
+            if state_changed:
+                self.save_state()
+            print("  [STATE] Position reconciliation complete.\n")
+            
+        except Exception as e:
+            print(f"  [WARN] Failed to reconcile positions: {e}")
+
     @property
     def active_position(self):
         """Active position for the symbol currently being processed."""
@@ -282,6 +400,7 @@ class DeltaTrader:
             self.positions.pop(self.symbol_canonical, None)
         else:
             self.positions[self.symbol_canonical] = value
+        self.save_state()
 
     @property
     def _notified_signals(self):
@@ -503,7 +622,44 @@ class DeltaTrader:
 
         # Position Management & Dynamic Trailing Stop
         if pos_size != 0 or self.active_position is not None:
-            self._manage_active_position(curr_price, curr_bar)
+            if not self.dry_run and pos_size == 0:
+                print(f"  [{self.symbol_canonical}] [STATE] Position was closed externally on the exchange. Clearing local state.")
+                self.active_position = None
+            else:
+                if not self.dry_run:
+                    if self.active_position is None:
+                        # Reconstruct position state (self-healing recovery on startup/mismatch)
+                        direction = "long" if pos_size > 0 else "short"
+                        print(f"  [{self.symbol_canonical}] [STATE] Active position detected on exchange but missing locally. Reconstructing...")
+                        
+                        exchange_entry_px = curr_price # fallback
+                        try:
+                            positions = self.client.get_positions(self.symbol)
+                            for p in positions:
+                                if p.get("product_symbol", p.get("symbol", "")) == self.symbol:
+                                    exchange_entry_px = float(p.get("entry_price", curr_price))
+                                    break
+                        except Exception:
+                            pass
+                        
+                        stop_dist = self.params.stop_atr_mult * curr_bar["atr"]
+                        stop_price = exchange_entry_px - stop_dist if direction == "long" else exchange_entry_px + stop_dist
+                        
+                        self.active_position = {
+                            "direction": direction,
+                            "entry_price": exchange_entry_px,
+                            "stop_price": stop_price,
+                            "trail_stop": stop_price,
+                            "peak_price": exchange_entry_px,
+                            "size": abs(pos_size),
+                            "type": "recovered",
+                            "init_risk": stop_dist
+                        }
+                    elif self.active_position["size"] != abs(pos_size):
+                        print(f"  [{self.symbol_canonical}] [STATE] Position size mismatch. Syncing size: {self.active_position['size']} -> {abs(pos_size)}")
+                        self.active_position["size"] = abs(pos_size)
+                        
+                self._manage_active_position(curr_price, curr_bar)
         elif signal is not None:
             # Cooldown check: skip entry if we exited too recently (matches backtest)
             curr_candle_ts = self._get_candle_ts(curr_bar)
@@ -742,8 +898,8 @@ class DeltaTrader:
                 if not self.dry_run:
                     self.client.cancel_all_orders(self.symbol)
                     self.client.place_order(self.symbol, pos["size"], "sell", "market_order")
-                self.active_position = None
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
+                self.active_position = None
                 try:
                     self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
                 except Exception:
@@ -797,8 +953,8 @@ class DeltaTrader:
                 if not self.dry_run:
                     self.client.cancel_all_orders(self.symbol)
                     self.client.place_order(self.symbol, pos["size"], "buy", "market_order")
-                self.active_position = None
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
+                self.active_position = None
                 try:
                     self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
                 except Exception:
@@ -872,6 +1028,7 @@ class DeltaTrader:
             sys.exit(1)
 
         self.symbols = selected
+        self.reconcile_positions()
 
         # Notify selected symbols (use canonical forms)
         try:
