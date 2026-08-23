@@ -1,0 +1,381 @@
+﻿===========================================================================
+  ALGO SIGNAL DIAGNOSTIC -- 2026-08-21 17:13 UTC
+  Checking 6 symbols: BTC/USDT, ETH/USDT, SOL/USDT, DOGE/USDT, XAUT/USDT, AVAX/USDT
+  Strategy: 4H Trend Rider
+===========================================================================
+
+===========================================================================
+  DIAGNOSING: BTC/USDT
+===========================================================================
+
+  [MARKET STATE] Last completed 4H candle:
+     Time:           2026-08-21 12:00:00+00:00
+     Close:          $77,221.98
+     EMA21 (Fast):   $70,680.67
+     EMA55 (Slow):   $67,215.51
+     SuperTrend:     BULL (dir=1)
+     RSI:            94.3
+     ATR:            $1,374.54
+     Donchian High:  $79,500.00
+     Donchian Low:   $62,716.00
+
+  [TREND ALIGNMENT CHECK]
+     EMA21 > EMA55:        YES (fast=70680.67, slow=67215.51)
+     SuperTrend Bullish:    YES
+     => trend_bull:         YES
+     EMA21 < EMA55:        NO
+     SuperTrend Bearish:    NO
+     => trend_bear:         NO
+
+  [EMA SLOPE CHECK]
+     EMA21 rising (slope > 3 bars ago): YES
+     EMA21 falling (slope < 3 bars ago): NO
+
+  [ENTRY CONDITION ANALYSIS] (Last Completed Candle)
+     [LONG Mode Active -- Checking 3 entry types]
+
+     PULLBACK Entry:
+        Prev low touched EMA21*1.003 (70892.72): NO (prev low=76235.76)
+        Close > EMA21:                                    YES (close=77221.98, ema=70680.67)
+        Bullish candle (close > open):                    YES (close=77221.98, open=76722.31)
+        => PULLBACK SIGNAL: NO
+
+     BREAKOUT Entry:
+        Close > Donchian High: NO (close=77221.98, dh=79500.00)
+        RSI < 78.0:              NO (rsi=94.3)
+        => BREAKOUT SIGNAL: NO
+
+     FRESH TREND Entry:
+        SuperTrend recently flipped bull: NO
+        Close > EMA21:                    YES
+        => FRESH TREND SIGNAL: NO
+
+  [SIGNAL HISTORY] (last 42 candles = 168h)
+     >> 2026-08-19 12:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 08:00:00+00:00 -> LONG pullback
+     >> 2026-08-18 12:00:00+00:00 -> LONG breakout
+     >> 2026-08-16 20:00:00+00:00 -> SHORT pullback
+     >> 2026-08-16 16:00:00+00:00 -> SHORT pullback
+     >> 2026-08-16 08:00:00+00:00 -> SHORT pullback
+     >> 2026-08-16 04:00:00+00:00 -> SHORT pullback
+     >> 2026-08-15 20:00:00+00:00 -> SHORT pullback
+
+  [LAST SIGNAL EVER] (scanning all available data)
+     Last signal: LONG pullback at 2026-08-19 12:00:00+00:00
+     (12 bars ago = 48h = 2.0 days)
+
+===========================================================================
+  DIAGNOSING: ETH/USDT
+===========================================================================
+
+  [MARKET STATE] Last completed 4H candle:
+     Time:           2026-08-21 12:00:00+00:00
+     Close:          $2,393.65
+     EMA21 (Fast):   $2,194.10
+     EMA55 (Slow):   $2,047.08
+     SuperTrend:     BULL (dir=1)
+     RSI:            94.4
+     ATR:            $50.37
+     Donchian High:  $2,447.98
+     Donchian Low:   $1,869.17
+
+  [TREND ALIGNMENT CHECK]
+     EMA21 > EMA55:        YES (fast=2194.10, slow=2047.08)
+     SuperTrend Bullish:    YES
+     => trend_bull:         YES
+     EMA21 < EMA55:        NO
+     SuperTrend Bearish:    NO
+     => trend_bear:         NO
+
+  [EMA SLOPE CHECK]
+     EMA21 rising (slope > 3 bars ago): YES
+     EMA21 falling (slope < 3 bars ago): NO
+
+  [ENTRY CONDITION ANALYSIS] (Last Completed Candle)
+     [LONG Mode Active -- Checking 3 entry types]
+
+     PULLBACK Entry:
+        Prev low touched EMA21*1.003 (2200.68): NO (prev low=2357.18)
+        Close > EMA21:                                    YES (close=2393.65, ema=2194.10)
+        Bullish candle (close > open):                    YES (close=2393.65, open=2370.48)
+        => PULLBACK SIGNAL: NO
+
+     BREAKOUT Entry:
+        Close > Donchian High: NO (close=2393.65, dh=2447.98)
+        RSI < 78.0:              NO (rsi=94.4)
+        => BREAKOUT SIGNAL: NO
+
+     FRESH TREND Entry:
+        SuperTrend recently flipped bull: NO
+        Close > EMA21:                    YES
+        => FRESH TREND SIGNAL: NO
+
+  [SIGNAL HISTORY] (last 42 candles = 168h)
+     >> 2026-08-19 16:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 12:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 08:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 04:00:00+00:00 -> LONG pullback
+     >> 2026-08-18 12:00:00+00:00 -> LONG pullback
+     >> 2026-08-18 08:00:00+00:00 -> LONG pullback
+     >> 2026-08-18 04:00:00+00:00 -> LONG pullback
+     >> 2026-08-17 16:00:00+00:00 -> LONG fresh_trend
+     >> 2026-08-17 12:00:00+00:00 -> LONG pullback
+     >> 2026-08-16 20:00:00+00:00 -> SHORT pullback
+     >> 2026-08-16 08:00:00+00:00 -> SHORT pullback
+     >> 2026-08-16 04:00:00+00:00 -> SHORT pullback
+     >> 2026-08-15 20:00:00+00:00 -> SHORT pullback
+     >> 2026-08-15 08:00:00+00:00 -> SHORT pullback
+     >> 2026-08-15 04:00:00+00:00 -> SHORT pullback
+     >> 2026-08-14 16:00:00+00:00 -> SHORT pullback
+
+  [LAST SIGNAL EVER] (scanning all available data)
+     Last signal: LONG pullback at 2026-08-19 16:00:00+00:00
+     (11 bars ago = 44h = 1.8 days)
+
+===========================================================================
+  DIAGNOSING: SOL/USDT
+===========================================================================
+
+  [MARKET STATE] Last completed 4H candle:
+     Time:           2026-08-21 12:00:00+00:00
+     Close:          $91.37
+     EMA21 (Fast):   $84.58
+     EMA55 (Slow):   $80.19
+     SuperTrend:     BULL (dir=1)
+     RSI:            89.2
+     ATR:            $1.73
+     Donchian High:  $93.39
+     Donchian Low:   $74.10
+
+  [TREND ALIGNMENT CHECK]
+     EMA21 > EMA55:        YES (fast=84.58, slow=80.19)
+     SuperTrend Bullish:    YES
+     => trend_bull:         YES
+     EMA21 < EMA55:        NO
+     SuperTrend Bearish:    NO
+     => trend_bear:         NO
+
+  [EMA SLOPE CHECK]
+     EMA21 rising (slope > 3 bars ago): YES
+     EMA21 falling (slope < 3 bars ago): NO
+
+  [ENTRY CONDITION ANALYSIS] (Last Completed Candle)
+     [LONG Mode Active -- Checking 3 entry types]
+
+     PULLBACK Entry:
+        Prev low touched EMA21*1.003 (84.84): NO (prev low=89.91)
+        Close > EMA21:                                    YES (close=91.37, ema=84.58)
+        Bullish candle (close > open):                    YES (close=91.37, open=90.30)
+        => PULLBACK SIGNAL: NO
+
+     BREAKOUT Entry:
+        Close > Donchian High: NO (close=91.37, dh=93.39)
+        RSI < 78.0:              NO (rsi=89.2)
+        => BREAKOUT SIGNAL: NO
+
+     FRESH TREND Entry:
+        SuperTrend recently flipped bull: NO
+        Close > EMA21:                    YES
+        => FRESH TREND SIGNAL: NO
+
+  [SIGNAL HISTORY] (last 42 candles = 168h)
+     >> 2026-08-19 16:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 12:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 08:00:00+00:00 -> LONG breakout
+     >> 2026-08-18 16:00:00+00:00 -> LONG fresh_trend
+     >> 2026-08-18 12:00:00+00:00 -> LONG pullback
+
+  [LAST SIGNAL EVER] (scanning all available data)
+     Last signal: LONG pullback at 2026-08-19 16:00:00+00:00
+     (11 bars ago = 44h = 1.8 days)
+
+===========================================================================
+  DIAGNOSING: DOGE/USDT
+===========================================================================
+
+  [MARKET STATE] Last completed 4H candle:
+     Time:           2026-08-21 12:00:00+00:00
+     Close:          $0.08
+     EMA21 (Fast):   $0.08
+     EMA55 (Slow):   $0.07
+     SuperTrend:     BULL (dir=1)
+     RSI:            87.1
+     ATR:            $0.00
+     Donchian High:  $0.09
+     Donchian Low:   $0.07
+
+  [TREND ALIGNMENT CHECK]
+     EMA21 > EMA55:        YES (fast=0.08, slow=0.07)
+     SuperTrend Bullish:    YES
+     => trend_bull:         YES
+     EMA21 < EMA55:        NO
+     SuperTrend Bearish:    NO
+     => trend_bear:         NO
+
+  [EMA SLOPE CHECK]
+     EMA21 rising (slope > 3 bars ago): YES
+     EMA21 falling (slope < 3 bars ago): NO
+
+  [ENTRY CONDITION ANALYSIS] (Last Completed Candle)
+     [LONG Mode Active -- Checking 3 entry types]
+
+     PULLBACK Entry:
+        Prev low touched EMA21*1.003 (0.08): NO (prev low=0.08)
+        Close > EMA21:                                    YES (close=0.08, ema=0.08)
+        Bullish candle (close > open):                    YES (close=0.08, open=0.08)
+        => PULLBACK SIGNAL: NO
+
+     BREAKOUT Entry:
+        Close > Donchian High: NO (close=0.08, dh=0.09)
+        RSI < 78.0:              NO (rsi=87.1)
+        => BREAKOUT SIGNAL: NO
+
+     FRESH TREND Entry:
+        SuperTrend recently flipped bull: NO
+        Close > EMA21:                    YES
+        => FRESH TREND SIGNAL: NO
+
+  [SIGNAL HISTORY] (last 42 candles = 168h)
+     >> 2026-08-19 16:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 12:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 04:00:00+00:00 -> SHORT pullback
+     >> 2026-08-16 20:00:00+00:00 -> SHORT pullback
+     >> 2026-08-16 16:00:00+00:00 -> SHORT pullback
+     >> 2026-08-16 08:00:00+00:00 -> SHORT pullback
+     >> 2026-08-15 20:00:00+00:00 -> SHORT pullback
+     >> 2026-08-15 16:00:00+00:00 -> SHORT pullback
+     >> 2026-08-15 08:00:00+00:00 -> SHORT pullback
+     >> 2026-08-15 04:00:00+00:00 -> SHORT pullback
+     >> 2026-08-14 16:00:00+00:00 -> SHORT pullback
+
+  [LAST SIGNAL EVER] (scanning all available data)
+     Last signal: LONG pullback at 2026-08-19 16:00:00+00:00
+     (11 bars ago = 44h = 1.8 days)
+
+===========================================================================
+  DIAGNOSING: XAUT/USDT
+===========================================================================
+
+  [MARKET STATE] Last completed 4H candle:
+     Time:           2026-08-21 12:00:00+00:00
+     Close:          $4,591.59
+     EMA21 (Fast):   $4,474.28
+     EMA55 (Slow):   $4,408.04
+     SuperTrend:     BULL (dir=1)
+     RSI:            78.3
+     ATR:            $33.43
+     Donchian High:  $4,580.19
+     Donchian Low:   $4,318.08
+
+  [TREND ALIGNMENT CHECK]
+     EMA21 > EMA55:        YES (fast=4474.28, slow=4408.04)
+     SuperTrend Bullish:    YES
+     => trend_bull:         YES
+     EMA21 < EMA55:        NO
+     SuperTrend Bearish:    NO
+     => trend_bear:         NO
+
+  [EMA SLOPE CHECK]
+     EMA21 rising (slope > 3 bars ago): YES
+     EMA21 falling (slope < 3 bars ago): NO
+
+  [ENTRY CONDITION ANALYSIS] (Last Completed Candle)
+     [LONG Mode Active -- Checking 3 entry types]
+
+     PULLBACK Entry:
+        Prev low touched EMA21*1.003 (4487.70): NO (prev low=4542.45)
+        Close > EMA21:                                    YES (close=4591.59, ema=4474.28)
+        Bullish candle (close > open):                    YES (close=4591.59, open=4574.15)
+        => PULLBACK SIGNAL: NO
+
+     BREAKOUT Entry:
+        Close > Donchian High: YES (close=4591.59, dh=4580.19)
+        RSI < 78.0:              NO (rsi=78.3)
+        => BREAKOUT SIGNAL: NO
+
+     FRESH TREND Entry:
+        SuperTrend recently flipped bull: NO
+        Close > EMA21:                    YES
+        => FRESH TREND SIGNAL: NO
+
+  [SIGNAL HISTORY] (last 42 candles = 168h)
+     >> 2026-08-21 08:00:00+00:00 -> LONG breakout
+     >> 2026-08-21 04:00:00+00:00 -> LONG breakout
+     >> 2026-08-20 16:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 16:00:00+00:00 -> LONG pullback
+     >> 2026-08-19 12:00:00+00:00 -> LONG pullback
+     >> 2026-08-18 08:00:00+00:00 -> LONG pullback
+     >> 2026-08-18 04:00:00+00:00 -> LONG pullback
+     >> 2026-08-17 20:00:00+00:00 -> LONG pullback
+     >> 2026-08-17 16:00:00+00:00 -> LONG fresh_trend
+     >> 2026-08-17 12:00:00+00:00 -> LONG pullback
+
+  [LAST SIGNAL EVER] (scanning all available data)
+     Last signal: LONG breakout at 2026-08-21 08:00:00+00:00
+     (1 bars ago = 4h = 0.2 days)
+
+===========================================================================
+  DIAGNOSING: AVAX/USDT
+===========================================================================
+
+  [MARKET STATE] Last completed 4H candle:
+     Time:           2026-08-21 12:00:00+00:00
+     Close:          $7.62
+     EMA21 (Fast):   $6.94
+     EMA55 (Slow):   $6.67
+     SuperTrend:     BULL (dir=1)
+     RSI:            88.3
+     ATR:            $0.18
+     Donchian High:  $7.70
+     Donchian Low:   $6.24
+
+  [TREND ALIGNMENT CHECK]
+     EMA21 > EMA55:        YES (fast=6.94, slow=6.67)
+     SuperTrend Bullish:    YES
+     => trend_bull:         YES
+     EMA21 < EMA55:        NO
+     SuperTrend Bearish:    NO
+     => trend_bear:         NO
+
+  [EMA SLOPE CHECK]
+     EMA21 rising (slope > 3 bars ago): YES
+     EMA21 falling (slope < 3 bars ago): NO
+
+  [ENTRY CONDITION ANALYSIS] (Last Completed Candle)
+     [LONG Mode Active -- Checking 3 entry types]
+
+     PULLBACK Entry:
+        Prev low touched EMA21*1.003 (6.96): NO (prev low=7.37)
+        Close > EMA21:                                    YES (close=7.62, ema=6.94)
+        Bullish candle (close > open):                    YES (close=7.62, open=7.49)
+        => PULLBACK SIGNAL: NO
+
+     BREAKOUT Entry:
+        Close > Donchian High: NO (close=7.62, dh=7.70)
+        RSI < 78.0:              NO (rsi=88.3)
+        => BREAKOUT SIGNAL: NO
+
+     FRESH TREND Entry:
+        SuperTrend recently flipped bull: NO
+        Close > EMA21:                    YES
+        => FRESH TREND SIGNAL: NO
+
+  [SIGNAL HISTORY] (last 42 candles = 168h)
+     >> 2026-08-20 08:00:00+00:00 -> LONG breakout
+     >> 2026-08-20 00:00:00+00:00 -> LONG fresh_trend
+     >> 2026-08-19 20:00:00+00:00 -> LONG fresh_trend
+     >> 2026-08-19 08:00:00+00:00 -> SHORT pullback
+     >> 2026-08-19 04:00:00+00:00 -> SHORT pullback
+     >> 2026-08-18 20:00:00+00:00 -> SHORT pullback
+     >> 2026-08-18 16:00:00+00:00 -> SHORT pullback
+     >> 2026-08-18 04:00:00+00:00 -> SHORT fresh_trend
+     >> 2026-08-18 00:00:00+00:00 -> SHORT pullback
+     >> 2026-08-15 04:00:00+00:00 -> LONG fresh_trend
+
+  [LAST SIGNAL EVER] (scanning all available data)
+     Last signal: LONG breakout at 2026-08-20 08:00:00+00:00
+     (7 bars ago = 28h = 1.2 days)
+
+===========================================================================
+  DIAGNOSTIC COMPLETE
+===========================================================================

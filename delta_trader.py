@@ -217,30 +217,36 @@ class DeltaClient:
 
 class DeltaTrader:
     def __init__(self):
+        def get_env_stripped(key: str, default: str = "") -> str:
+            val = os.getenv(key, default).strip()
+            if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                val = val[1:-1].strip()
+            return val
+
         # Load config from environment variables or defaults
-        self.api_key = os.getenv("DELTA_API_KEY", "")
-        self.api_secret = os.getenv("DELTA_API_SECRET", "")
-        self.base_url = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange")
+        self.api_key = get_env_stripped("DELTA_API_KEY", "")
+        self.api_secret = get_env_stripped("DELTA_API_SECRET", "")
+        self.base_url = get_env_stripped("DELTA_BASE_URL", "https://api.india.delta.exchange")
         # Accept SYMBOL in env as either 'BTC/USD' or 'BTCUSD'
-        env_symbol = os.getenv("SYMBOL", "BTCUSD")
-        self.timeframe = os.getenv("TIMEFRAME", "4h")
+        env_symbol = get_env_stripped("SYMBOL", "BTCUSD")
+        self.timeframe = get_env_stripped("TIMEFRAME", "4h")
         try:
             self.symbol_canonical = to_ccxt(env_symbol)
             self.symbol = to_delta(self.symbol_canonical)
         except Exception:
             self.symbol_canonical = env_symbol
             self.symbol = env_symbol
-        self.risk_pct = float(os.getenv("RISK_PCT", "1.5"))
-        self.leverage = int(os.getenv("LEVERAGE", "5"))
-        self.fixed_margin_usd = float(os.getenv("FIXED_MARGIN_USD", "0"))
-        self.dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
-        self.poll_interval = int(os.getenv("POLL_INTERVAL_SEC", "60"))
+        self.risk_pct = float(get_env_stripped("RISK_PCT", "1.5"))
+        self.leverage = int(get_env_stripped("LEVERAGE", "5"))
+        self.fixed_margin_usd = float(get_env_stripped("FIXED_MARGIN_USD", "0"))
+        self.dry_run = get_env_stripped("DRY_RUN", "true").lower() == "true"
+        self.poll_interval = int(get_env_stripped("POLL_INTERVAL_SEC", "60"))
 
         # Strategy parameters
         self.params = TrendRiderParams(
             risk_pct=self.risk_pct,
-            trail_pct_activation=float(os.getenv("TRAIL_PCT_ACTIVATION", "1.0")),
-            trail_pct_distance=float(os.getenv("TRAIL_PCT_DISTANCE", "0.4")),
+            trail_pct_activation=float(get_env_stripped("TRAIL_PCT_ACTIVATION", "1.0")),
+            trail_pct_distance=float(get_env_stripped("TRAIL_PCT_DISTANCE", "0.4")),
         )
 
         self.client = DeltaClient(self.api_key, self.api_secret, self.base_url)

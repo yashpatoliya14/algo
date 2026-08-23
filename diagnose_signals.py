@@ -22,6 +22,55 @@ import pandas as pd
 
 from trend_rider_engine import TrendRiderParams, compute_indicators
 from symbol_utils import to_ccxt, to_delta, to_binance
+import requests
+
+
+def fetch_candles_delta(symbol_delta: str, timeframe: str = "4h", limit: int = 150) -> pd.DataFrame | None:
+    """Fetch candles from Delta Exchange REST API (matches delta_trader.py priority 1)."""
+    try:
+        base_url = os.getenv("DELTA_BASE_URL", "https://api.india.delta.exchange").strip()
+        if (base_url.startswith('"') and base_url.endswith('"')) or (base_url.startswith("'") and base_url.endswith("'")):
+            base_url = base_url[1:-1].strip()
+        base_url = base_url.rstrip("/")
+
+        now_ts = int(time.time())
+        
+        # Convert timeframe to multiplier
+        tf = timeframe.strip().lower()
+        multiplier = 4
+        if tf.endswith("h"):
+            multiplier = int(tf[:-1])
+        elif tf.endswith("m"):
+            multiplier = int(tf[:-1]) / 60
+        elif tf.endswith("d"):
+            multiplier = int(tf[:-1]) * 24
+
+        start_ts = now_ts - int(limit * multiplier * 3600)
+
+        params = {
+            "symbol": symbol_delta,
+            "resolution": timeframe,
+            "start": start_ts,
+            "end": now_ts
+        }
+        resp = requests.get(f"{base_url}/v2/history/candles", params=params, timeout=15)
+        resp.raise_for_status()
+        raw_candles = resp.json().get("result", [])
+        if not raw_candles:
+            return None
+
+        df = pd.DataFrame(raw_candles)
+        df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        df = df.rename(columns={"open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"})
+        df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+        df = df.sort_values("ts").drop_duplicates("ts").set_index("ts")
+
+        if len(df) < 5:
+            return None
+        return df
+    except Exception as e:
+        print(f"  [WARN] Delta candle fetch failed: {e}")
+        return None
 
 
 def fetch_candles_binance(symbol_ccxt: str, timeframe: str = "4h", limit: int = 150) -> pd.DataFrame:
@@ -63,10 +112,24 @@ def diagnose_symbol(symbol_canonical: str, params: TrendRiderParams, lookback_ba
     print(f"  DIAGNOSING: {symbol_canonical}")
     print(f"{'='*75}")
 
+    df = None
     try:
-        df = fetch_candles_binance(symbol_canonical, "4h", limit=150)
+        # Try fetching from Delta Exchange first (matches live bot)
+        symbol_delta = to_delta(symbol_canonical)
+        df = fetch_candles_delta(symbol_delta, "4h", limit=150)
+        if df is not None:
+            print(f"  [DATA] Candles from Delta Exchange ({len(df)} bars)")
+        else:
+            print(f"  [DATA] Delta returned no data for {symbol_delta}, trying Binance fallback...")
+            df = fetch_candles_binance(symbol_canonical, "4h", limit=150)
+            if df is not None:
+                print(f"  [DATA] Candles from Binance fallback ({len(df)} bars)")
     except Exception as e:
         print(f"  [ERROR] Could not fetch data: {e}")
+        return
+
+    if df is None:
+        print("  [ERROR] Failed to fetch candle data from both Delta and Binance.")
         return
 
     d = compute_indicators(df, params)
@@ -287,9 +350,15 @@ def main():
         except Exception:
             print(f"  [WARN] Skipping invalid symbol: {s}")
 
+    def get_env_stripped(key: str, default: str = "") -> str:
+        val = os.getenv(key, default).strip()
+        if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1].strip()
+        return val
+
     params = TrendRiderParams(
-        trail_pct_activation=float(os.getenv("TRAIL_PCT_ACTIVATION", "1.0")),
-        trail_pct_distance=float(os.getenv("TRAIL_PCT_DISTANCE", "0.4")),
+        trail_pct_activation=float(get_env_stripped("TRAIL_PCT_ACTIVATION", "1.0")),
+        trail_pct_distance=float(get_env_stripped("TRAIL_PCT_DISTANCE", "0.4")),
     )
 
     print("=" * 75)
