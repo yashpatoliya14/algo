@@ -206,12 +206,23 @@ class DeltaClient:
         side: 'buy' or 'sell'
         order_type: 'market_order' or 'stop_market_order'
         """
+        actual_order_type = order_type
+        stop_order_type = None
+
+        if order_type == "stop_market_order":
+            actual_order_type = "market_order"
+            stop_order_type = "stop_loss_order"
+
         payload = {
             "product_symbol": symbol,
             "size": int(size),
             "side": side.lower(),
-            "order_type": order_type,
+            "order_type": actual_order_type,
         }
+        
+        if stop_order_type:
+            payload["stop_order_type"] = stop_order_type
+            
         if stop_price is not None:
             payload["stop_price"] = str(round(stop_price, 2))
 
