@@ -185,8 +185,20 @@ class DeltaClient:
 
     def set_leverage(self, symbol: str, leverage: int) -> dict:
         """Set position leverage."""
-        payload = {"product_symbol": symbol, "leverage": str(leverage)}
-        return self._request("POST", "/v2/orders/leverage", payload=payload, auth=True)
+        if not hasattr(self, '_product_map'):
+            self._product_map = {}
+            try:
+                for p in self.get_products():
+                    self._product_map[p.get("symbol")] = p.get("id")
+            except Exception:
+                pass
+                
+        product_id = self._product_map.get(symbol)
+        if not product_id:
+            raise ValueError(f"Product ID not found for symbol: {symbol}")
+            
+        payload = {"leverage": str(leverage)}
+        return self._request("POST", f"/v2/products/{product_id}/orders/leverage", payload=payload, auth=True)
 
     def place_order(self, symbol: str, size: int, side: str, order_type: str = "market_order", stop_price: float = None) -> dict:
         """
