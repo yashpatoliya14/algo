@@ -357,8 +357,8 @@ def main():
         return val
 
     params = TrendRiderParams(
-        trail_pct_activation=float(get_env_stripped("TRAIL_PCT_ACTIVATION", "1.0")),
-        trail_pct_distance=float(get_env_stripped("TRAIL_PCT_DISTANCE", "0.4")),
+        trail_pct_activation=float(get_env_stripped("TRAIL_PCT_ACTIVATION", "0.5")),
+        trail_pct_distance=float(get_env_stripped("TRAIL_PCT_DISTANCE", "0.3")),
     )
 
     print("=" * 75)

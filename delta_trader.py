@@ -265,11 +265,10 @@ class DeltaTrader:
         self.dry_run = get_env_stripped("DRY_RUN", "true").lower() == "true"
         self.poll_interval = int(get_env_stripped("POLL_INTERVAL_SEC", "60"))
 
-        # Strategy parameters
         self.params = TrendRiderParams(
             risk_pct=self.risk_pct,
-            trail_pct_activation=float(get_env_stripped("TRAIL_PCT_ACTIVATION", "1.0")),
-            trail_pct_distance=float(get_env_stripped("TRAIL_PCT_DISTANCE", "0.4")),
+            trail_pct_activation=float(get_env_stripped("TRAIL_PCT_ACTIVATION", "0.5")),
+            trail_pct_distance=float(get_env_stripped("TRAIL_PCT_DISTANCE", "0.3")),
         )
 
         self.client = DeltaClient(self.api_key, self.api_secret, self.base_url)
@@ -647,6 +646,10 @@ class DeltaTrader:
         if pos_size != 0 or self.active_position is not None:
             if not self.dry_run and pos_size == 0:
                 print(f"  [{self.symbol_canonical}] [STATE] Position was closed externally on the exchange. Clearing local state.")
+                try:
+                    self.notifier.send(f"⚠️ Manual Exit Detected\nSymbol: {self.symbol_canonical}\nPosition was closed externally on the exchange.")
+                except Exception as e:
+                    print(f"  [{self.symbol_canonical}] [WARN] Failed to send manual exit notification: {e}")
                 self.active_position = None
             else:
                 if not self.dry_run:

@@ -106,8 +106,8 @@ class TrendRiderParams:
     trail_be_buffer: float = 0.2
     trail_phase2_mult: float = 2.5
     trail_phase3_mult: float = 1.8
-    trail_pct_activation: float = 1.0  # Activate trailing stop when price moves 1% in profit
-    trail_pct_distance: float = 0.4    # Trail 0.4% behind peak price
+    trail_pct_activation: float = 0.5  # Activate trailing stop when price moves 0.5% in profit
+    trail_pct_distance: float = 0.3    # Trail 0.3% behind peak price
     risk_pct: float = 1.5
     cooldown_bars: int = 3
 

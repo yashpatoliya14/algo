@@ -3,7 +3,7 @@ BTCUSD 4H Trend Rider — Terminal Dashboard
 ============================================
 Interactive CLI that backtests the Trend Rider strategy on BTCUSD 4H.
 Select any year, see overall winrate, annual return, metrics & trade logs instantly.
-Includes 1.0% profit trigger with 0.4% trailing stop loss.
+Includes 0.5% profit trigger with 0.3% trailing stop loss.
 
 Usage:  python backtest_cli.py
 """
@@ -72,7 +72,7 @@ except Exception:
 STRATEGY_DESC = (
     "Trend Rider v2 -- Supertrend(10,3) + EMA21/55 trend detection\n"
     "  Entries: Pullback-to-EMA21 | Donchian-30 Breakout | Supertrend Flip\n"
-    "  Trailing Stop: 1.0% Profit Activation -> 0.4% Trailing Stop\n"
+    "  Trailing Stop: 0.5% Profit Activation -> 0.3% Trailing Stop\n"
     "  No partial exits -- full ride on every trend"
 )
 
@@ -111,7 +111,7 @@ def print_header():
     print()
     print(f"  {C.CYAN}{C.BOLD}+{'=' * 58}+{C.RESET}")
     print(f"  {C.CYAN}{C.BOLD}|{C.RESET}      {C.MAGENTA}{C.BOLD}BTCUSD 4H TREND RIDER{C.RESET}  {C.GRAY}-- Crypto Trend Strategy{C.RESET}    {C.CYAN}{C.BOLD}|{C.RESET}")
-    print(f"  {C.CYAN}{C.BOLD}|{C.RESET}      {C.GRAY}Pullback + Breakout + ST Flip + 1%->0.4% Trail{C.RESET}      {C.CYAN}{C.BOLD}|{C.RESET}")
+    print(f"  {C.CYAN}{C.BOLD}|{C.RESET}      {C.GRAY}Pullback + Breakout + ST Flip + 0.5%->0.3% Trail{C.RESET}      {C.CYAN}{C.BOLD}|{C.RESET}")
     print(f"  {C.CYAN}{C.BOLD}+{'=' * 58}+{C.RESET}")
     print()
 
@@ -257,7 +257,7 @@ def save_cache(year: int, data: dict, symbol: str = None):
 
 
 def run_year(year: int):
-    """Fetch data, run Trend Rider backtest with 1%->0.4% trailing stop, return result dict."""
+    """Fetch data, run Trend Rider backtest with 0.5%->0.3% trailing stop, return result dict."""
     df4h = fetch_year_data(year)
 
     if len(df4h) < 100:
@@ -266,8 +266,8 @@ def run_year(year: int):
     print(f"  {C.GRAY}Running Trend Rider backtest...{C.RESET}", flush=True)
 
     params = TrendRiderParams(
-        trail_pct_activation=1.0, # Move 1% in profit -> activate trailing stop
-        trail_pct_distance=0.4,   # Trail 0.4% behind peak price
+        trail_pct_activation=0.5, # Move 0.5% in profit -> activate trailing stop
+        trail_pct_distance=0.3,   # Trail 0.3% behind peak price
     )
     trades, eq_df = run_trend_rider_backtest(df4h, params, capital=CAPITAL)
     metrics = get_metrics(trades, eq_df, CAPITAL)
