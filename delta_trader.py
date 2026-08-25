@@ -1100,6 +1100,14 @@ class DeltaTrader:
         last_status_sent = time.time()
         last_6h_status_sent = time.time() - (6 * 3600) + 60 # trigger 1 minute after start
         last_processed_update_id = 0
+        
+        # Flush old updates
+        try:
+            flush_updates = self.notifier.get_updates(offset=-1)
+            if flush_updates:
+                last_processed_update_id = flush_updates[0]["update_id"]
+        except Exception:
+            pass
 
         self.print_banner()
         print(f"Starting continuous polling loop for {len(self.symbols)} symbols (every {self.poll_interval}s)... Press Ctrl+C to stop.")
@@ -1109,7 +1117,8 @@ class DeltaTrader:
         try:
             while True:
                 # Poll Telegram Updates
-                updates = self.notifier.get_updates()
+                req_offset = last_processed_update_id + 1 if last_processed_update_id > 0 else None
+                updates = self.notifier.get_updates(offset=req_offset)
                 for update in updates:
                     update_id = update.get("update_id", 0)
                     if update_id > last_processed_update_id:

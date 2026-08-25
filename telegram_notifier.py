@@ -128,12 +128,14 @@ class TelegramNotifier:
         txt = "\n".join(lines)
         self.send(txt)
 
-    def get_updates(self) -> list:
-        """Fetch latest telegram messages (without advancing offset so other bots aren't starved)."""
+    def get_updates(self, offset: int = None) -> list:
+        """Fetch latest telegram messages."""
         if not self.token:
             return []
-        # No offset provided, Telegram will return the last up to 100 unconfirmed updates.
-        res = _get("getUpdates", {"allowed_updates": '["message", "callback_query"]'})
+        params = {"allowed_updates": '["message", "callback_query"]'}
+        if offset is not None:
+            params["offset"] = offset
+        res = _get("getUpdates", params)
         if res and res.get("ok"):
             return res.get("result", [])
         return []
