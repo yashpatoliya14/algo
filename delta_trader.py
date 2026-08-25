@@ -1062,6 +1062,8 @@ class DeltaTrader:
             self.notifier.started(symbols_list, self.timeframe, self.dry_run, self.risk_pct, self.leverage)
         except Exception:
             pass
+            
+        last_status_sent = time.time()
 
         self.print_banner()
         print(f"Starting continuous polling loop for {len(self.symbols)} symbols (every {self.poll_interval}s)... Press Ctrl+C to stop.")
@@ -1070,6 +1072,15 @@ class DeltaTrader:
 
         try:
             while True:
+                # Send 12-hour status update
+                if time.time() - last_status_sent >= 12 * 3600:
+                    try:
+                        symbols_list = [s["canon"] for s in self.symbols]
+                        self.notifier.started(symbols_list, self.timeframe, self.dry_run, self.risk_pct, self.leverage)
+                    except Exception:
+                        pass
+                    last_status_sent = time.time()
+
                 cycle_count += 1
                 cycle_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                 print(f"\n{'─'*65}")
