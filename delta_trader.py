@@ -200,7 +200,7 @@ class DeltaClient:
         payload = {"leverage": str(leverage)}
         return self._request("POST", f"/v2/products/{product_id}/orders/leverage", payload=payload, auth=True)
 
-    def place_order(self, symbol: str, size: int, side: str, order_type: str = "market_order", stop_price: float = None) -> dict:
+    def place_order(self, symbol: str, size: int, side: str, order_type: str = "market_order", stop_price: float = None, reduce_only: bool = False) -> dict:
         """
         Place an order on Delta Exchange.
         side: 'buy' or 'sell'
@@ -225,6 +225,9 @@ class DeltaClient:
             
         if stop_price is not None:
             payload["stop_price"] = str(round(stop_price, 2))
+            
+        if reduce_only:
+            payload["reduce_only"] = True
 
         return self._request("POST", "/v2/orders", payload=payload, auth=True)
 
@@ -632,7 +635,7 @@ class DeltaTrader:
                 pnl = (exit_price - self.active_position["entry_price"]) * self.active_position["size"] if direction == "long" else (self.active_position["entry_price"] - exit_price) * self.active_position["size"]
                 if not self.dry_run:
                     self.client.cancel_all_orders(self.symbol)
-                    self.client.place_order(self.symbol, self.active_position["size"], "sell" if direction == "long" else "buy", "market_order")
+                    self.client.place_order(self.symbol, self.active_position["size"], "sell" if direction == "long" else "buy", "market_order", reduce_only=True)
                 self.active_position = None
                 try:
                     self.notifier.exit(self.symbol_canonical, direction, exit_price, pnl)
@@ -836,7 +839,7 @@ class DeltaTrader:
 
                 # Place stop loss order
                 exit_side = "sell" if direction == "long" else "buy"
-                stop_res = self.client.place_order(self.symbol, contracts, exit_side, "stop_market_order", stop_price=stop_price)
+                stop_res = self.client.place_order(self.symbol, contracts, exit_side, "stop_market_order", stop_price=stop_price, reduce_only=True)
                 print(f"  [LIVE ORDER] Stop Loss Placed: {stop_res.get('id')}")
 
                 self.active_position = {
@@ -954,7 +957,7 @@ class DeltaTrader:
                 print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
                 if not self.dry_run:
                     self.client.cancel_all_orders(self.symbol)
-                    self.client.place_order(self.symbol, pos["size"], "sell", "market_order")
+                    self.client.place_order(self.symbol, pos["size"], "sell", "market_order", reduce_only=True)
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 self.active_position = None
                 try:
@@ -1009,7 +1012,7 @@ class DeltaTrader:
                 print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
                 if not self.dry_run:
                     self.client.cancel_all_orders(self.symbol)
-                    self.client.place_order(self.symbol, pos["size"], "buy", "market_order")
+                    self.client.place_order(self.symbol, pos["size"], "buy", "market_order", reduce_only=True)
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 self.active_position = None
                 try:
