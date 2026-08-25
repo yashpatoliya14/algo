@@ -17,6 +17,17 @@ def _post(method: str, data: dict) -> dict:
     except Exception:
         return {}
 
+def _get(method: str, params: dict = None) -> dict:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        return {}
+    url = API_URL.format(token=token, method=method)
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        return r.json()
+    except Exception:
+        return {}
+
 
 class TelegramNotifier:
     def __init__(self, chat_id: Optional[str] = None):
@@ -26,13 +37,23 @@ class TelegramNotifier:
         self.on_exec = os.getenv("TELEGRAM_ON_EXECUTION", "true").lower() == "true"
         self.on_exit = os.getenv("TELEGRAM_ON_EXIT", "true").lower() == "true"
 
-    def send(self, text: str, parse_mode: Optional[str] = None):
+    def send(self, text: str, parse_mode: Optional[str] = None, reply_markup: dict = None):
         if not self.chat_id or not self.token:
             return None
         payload = {"chat_id": self.chat_id, "text": text, "disable_notification": False}
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         return _post("sendMessage", payload)
+        
+    def answer_callback(self, callback_query_id: str, text: str = ""):
+        if not self.token:
+            return None
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        return _post("answerCallbackQuery", payload)
 
     def signal(self, symbol: str, direction: str, signal_type: str, price: float):
         if not self.on_signal:
@@ -106,3 +127,13 @@ class TelegramNotifier:
         lines.append(f"TP / Exit Plan: {tp_note or 'No fixed TP; exit on trailing stop or trend reversal'}")
         txt = "\n".join(lines)
         self.send(txt)
+
+    def get_updates(self) -> list:
+        """Fetch latest telegram messages (without advancing offset so other bots aren't starved)."""
+        if not self.token:
+            return []
+        # No offset provided, Telegram will return the last up to 100 unconfirmed updates.
+        res = _get("getUpdates", {"allowed_updates": '["message", "callback_query"]'})
+        if res and res.get("ok"):
+            return res.get("result", [])
+        return []

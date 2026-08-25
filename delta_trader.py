@@ -292,6 +292,10 @@ class DeltaTrader:
         # Cooldown: track the candle timestamp of last exit per symbol
         # to enforce cooldown_bars gap before re-entry (matches backtest)
         self._last_exit_candle_ts: dict[str, int] = {}
+        
+        # Telegram manual control flags
+        self._force_open: dict[str, str] = {}
+        self._force_close: dict[str, bool] = {}
 
         # State persistence file
         self.state_file = Path(os.path.dirname(os.path.abspath(__file__))) / "trader_state.json"
@@ -619,7 +623,34 @@ class DeltaTrader:
 
         print(f"  [{self.symbol_canonical}] Price: ${curr_price:,.2f} | 4H Close: ${curr_bar['close']:,.2f} | EMA21: ${curr_bar['ema_fast']:,.2f} | ST: {'BULL' if curr_bar['st_dir'] == 1 else 'BEAR'}")
 
-        if signal:
+        # Check for forced open/close commands
+        if self._force_close.pop(self.symbol_canonical, False):
+            print(f"  [{self.symbol_canonical}] \033[96m>>> MANUAL CLOSE COMMAND RECEIVED <<<\033[0m")
+            if self.active_position:
+                direction = self.active_position["direction"]
+                exit_price = curr_price
+                pnl = (exit_price - self.active_position["entry_price"]) * self.active_position["size"] if direction == "long" else (self.active_position["entry_price"] - exit_price) * self.active_position["size"]
+                if not self.dry_run:
+                    self.client.cancel_all_orders(self.symbol)
+                    self.client.place_order(self.symbol, self.active_position["size"], "sell" if direction == "long" else "buy", "market_order")
+                self.active_position = None
+                try:
+                    self.notifier.exit(self.symbol_canonical, direction, exit_price, pnl)
+                    self.notifier.send(f"✅ Manual Close Executed\nSymbol: {self.symbol_canonical}\nPnL: {pnl:+.2f}")
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.notifier.send(f"❌ Failed to Close: No active position for {self.symbol_canonical}")
+                except Exception:
+                    pass
+
+        forced_open_dir = self._force_open.pop(self.symbol_canonical, None)
+        if forced_open_dir:
+            signal = forced_open_dir
+            signal_type = "manual"
+            print(f"  [{self.symbol_canonical}] \033[96m>>> MANUAL OPEN COMMAND RECEIVED: {signal.upper()} <<<\033[0m")
+        elif signal:
             print(f"  [{self.symbol_canonical}] \033[96m>>> SIGNAL DETECTED: {signal.upper()} {signal_type} <<<\033[0m")
         else:
             print(f"  [{self.symbol_canonical}] No signal on current closed 4H candle.")
@@ -1064,6 +1095,8 @@ class DeltaTrader:
             pass
             
         last_status_sent = time.time()
+        last_6h_status_sent = time.time() - (6 * 3600) + 60 # trigger 1 minute after start
+        last_processed_update_id = 0
 
         self.print_banner()
         print(f"Starting continuous polling loop for {len(self.symbols)} symbols (every {self.poll_interval}s)... Press Ctrl+C to stop.")
@@ -1072,7 +1105,71 @@ class DeltaTrader:
 
         try:
             while True:
-                # Send 12-hour status update
+                # Poll Telegram Updates
+                updates = self.notifier.get_updates()
+                for update in updates:
+                    update_id = update.get("update_id", 0)
+                    if update_id > last_processed_update_id:
+                        last_processed_update_id = update_id
+                        msg_text = update.get("message", {}).get("text", "").lower().strip()
+                        callback_query = update.get("callback_query")
+                        
+                        parts = []
+                        if callback_query:
+                            cb_data = callback_query.get("data", "").lower()
+                            cb_id = callback_query.get("id")
+                            self.notifier.answer_callback(cb_id)
+                            # Normalize callback data format to match msg format
+                            if cb_data.startswith("close_"):
+                                parts = ["close", cb_data.split("_")[1]]
+                            elif cb_data.startswith("open_"):
+                                _, cid, direction = cb_data.split("_")
+                                parts = ["open", cid, direction]
+                            elif cb_data.startswith("sl_"):
+                                _, cid = cb_data.split("_")
+                                self.notifier.send(f"To update SL for {cid.upper()}, please send the command:\n`/sl {cid.upper()} <price>`", parse_mode="Markdown")
+                        elif msg_text:
+                            if msg_text in ["/logs", "logs"]:
+                                last_6h_status_sent = 0
+                            parts = msg_text.split()
+                            
+                        if len(parts) >= 3 and parts[0] == "/sl" and parts[1].startswith("c"):
+                            try:
+                                idx = int(parts[1][1:]) - 1
+                                new_sl = float(parts[2])
+                                if 0 <= idx < len(self.symbols):
+                                    sym_canon = self.symbols[idx]["canon"]
+                                    pos = self.positions.get(sym_canon)
+                                    if pos:
+                                        pos["trail_stop"] = new_sl
+                                        pos["stop_price"] = new_sl
+                                        self.notifier.send(f"✅ SL for {sym_canon} manually updated to {new_sl:,.2f}")
+                                    else:
+                                        self.notifier.send(f"❌ No active position for {sym_canon}")
+                            except Exception:
+                                self.notifier.send("❌ Invalid format. Use: `/sl c1 65000`", parse_mode="Markdown")
+                                
+                        elif len(parts) >= 2 and parts[0] == "close" and parts[1].startswith("c"):
+                            try:
+                                idx = int(parts[1][1:]) - 1
+                                if 0 <= idx < len(self.symbols):
+                                    sym_canon = self.symbols[idx]["canon"]
+                                    self._force_close[sym_canon] = True
+                                    self.notifier.send(f"⏳ Command received: Queued CLOSE for {sym_canon} (will execute on next poll).")
+                            except Exception:
+                                pass
+                        elif len(parts) >= 3 and parts[0] == "open" and parts[1].startswith("c"):
+                            try:
+                                idx = int(parts[1][1:]) - 1
+                                direction = parts[2]
+                                if 0 <= idx < len(self.symbols) and direction in ["long", "short"]:
+                                    sym_canon = self.symbols[idx]["canon"]
+                                    self._force_open[sym_canon] = direction
+                                    self.notifier.send(f"⏳ Command received: Queued OPEN {direction.upper()} for {sym_canon} (will execute on next poll).")
+                            except Exception:
+                                pass
+
+                # Send 12-hour startup log update
                 if time.time() - last_status_sent >= 12 * 3600:
                     try:
                         symbols_list = [s["canon"] for s in self.symbols]
@@ -1080,6 +1177,51 @@ class DeltaTrader:
                     except Exception:
                         pass
                     last_status_sent = time.time()
+
+                # Send 6-hour professional open positions status
+                if time.time() - last_6h_status_sent >= 6 * 3600:
+                    lines = ["🌟 *CRYPTO ALGO STATUS* 🌟\n_Open Positions:_"]
+                    keyboard = []
+                    
+                    for idx, sym in enumerate(self.symbols):
+                        canon = sym["canon"]
+                        pos = self.positions.get(canon)
+                        if pos:
+                            direction = pos["direction"].upper()
+                            pnl_str = f"PnL: Unknown"
+                            try:
+                                ticker = self.client.get_ticker(sym["delta"])
+                                curr_px = float(ticker.get("mark_price", pos["entry_price"]))
+                                if pos["direction"] == "long":
+                                    pnl = (curr_px - pos["entry_price"]) * pos["size"]
+                                else:
+                                    pnl = (pos["entry_price"] - curr_px) * pos["size"]
+                                pnl_str = f"PnL: {pnl:+.2f} USDT"
+                            except Exception:
+                                pass
+                            lines.append(f"🔹 `[C{idx+1}]` *{canon}* {direction} | Size: {pos['size']} | {pnl_str} | SL: {pos.get('trail_stop', 0):.2f}")
+                            
+                            # Add buttons for active position
+                            keyboard.append([
+                                {"text": f"Close C{idx+1}", "callback_data": f"close_c{idx+1}"},
+                                {"text": f"Update SL C{idx+1}", "callback_data": f"sl_c{idx+1}"}
+                            ])
+                        else:
+                            lines.append(f"🔸 `[C{idx+1}]` *{canon}* None")
+                            
+                            # Add buttons to open new position
+                            keyboard.append([
+                                {"text": f"Long C{idx+1}", "callback_data": f"open_c{idx+1}_long"},
+                                {"text": f"Short C{idx+1}", "callback_data": f"open_c{idx+1}_short"}
+                            ])
+                            
+                    reply_markup = {"inline_keyboard": keyboard}
+                    
+                    try:
+                        self.notifier.send("\n".join(lines), parse_mode="Markdown", reply_markup=reply_markup)
+                    except Exception:
+                        pass
+                    last_6h_status_sent = time.time()
 
                 cycle_count += 1
                 cycle_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
