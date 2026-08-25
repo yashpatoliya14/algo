@@ -1125,6 +1125,8 @@ class DeltaTrader:
                             elif cb_data.startswith("open_"):
                                 _, cid, direction = cb_data.split("_")
                                 parts = ["open", cid, direction]
+                            elif cb_data.startswith("clear_"):
+                                parts = ["clear", cb_data.split("_")[1]]
                             elif cb_data.startswith("sl_"):
                                 _, cid = cb_data.split("_")
                                 self.notifier.send(f"To update SL for {cid.upper()}, please send the command:\n`/sl {cid.upper()} <price>`", parse_mode="Markdown")
@@ -1168,6 +1170,18 @@ class DeltaTrader:
                                     self.notifier.send(f"⏳ Command received: Queued OPEN {direction.upper()} for {sym_canon} (will execute on next poll).")
                             except Exception:
                                 pass
+                        elif len(parts) >= 2 and parts[0] == "clear" and parts[1].startswith("c"):
+                            try:
+                                idx = int(parts[1][1:]) - 1
+                                if 0 <= idx < len(self.symbols):
+                                    sym_canon = self.symbols[idx]["canon"]
+                                    if sym_canon in self.positions:
+                                        del self.positions[sym_canon]
+                                        self.notifier.send(f"✅ Local state cleared. Bot now thinks position for {sym_canon} is closed.")
+                                    else:
+                                        self.notifier.send(f"❌ Already clear for {sym_canon}.")
+                            except Exception:
+                                pass
 
                 # Send 12-hour startup log update
                 if time.time() - last_status_sent >= 12 * 3600:
@@ -1205,6 +1219,11 @@ class DeltaTrader:
                             keyboard.append([
                                 {"text": f"Close C{idx+1}", "callback_data": f"close_c{idx+1}"},
                                 {"text": f"Update SL C{idx+1}", "callback_data": f"sl_c{idx+1}"}
+                            ])
+                            keyboard.append([
+                                {"text": f"Clear C{idx+1}", "callback_data": f"clear_c{idx+1}"},
+                                {"text": f"Force Long", "callback_data": f"open_c{idx+1}_long"},
+                                {"text": f"Force Short", "callback_data": f"open_c{idx+1}_short"}
                             ])
                         else:
                             lines.append(f"🔸 `[C{idx+1}]` *{canon}* None")
