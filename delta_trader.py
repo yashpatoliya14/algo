@@ -408,6 +408,12 @@ class DeltaTrader:
                     # No position on exchange
                     if local_pos:
                         print(f"  [{canon_sym}] [WARN] Local state has active position but none found on exchange. Clearing local position.")
+                        # Cancel any lingering stop-loss / limit orders for this symbol
+                        try:
+                            self.client.cancel_all_orders(delta_sym)
+                            print(f"  [{canon_sym}] [STATE] Cancelled all pending orders for {delta_sym}.")
+                        except Exception as e:
+                            print(f"  [{canon_sym}] [WARN] Failed to cancel orders during reconciliation: {e}")
                         self.positions.pop(canon_sym, None)
                         state_changed = True
             
@@ -680,6 +686,12 @@ class DeltaTrader:
         if pos_size != 0 or self.active_position is not None:
             if not self.dry_run and pos_size == 0:
                 print(f"  [{self.symbol_canonical}] [STATE] Position was closed externally on the exchange. Clearing local state.")
+                # Cancel any lingering stop-loss / limit orders left from entry
+                try:
+                    self.client.cancel_all_orders(self.symbol)
+                    print(f"  [{self.symbol_canonical}] [STATE] Cancelled all pending orders for {self.symbol}.")
+                except Exception as e:
+                    print(f"  [{self.symbol_canonical}] [WARN] Failed to cancel pending orders: {e}")
                 try:
                     self.notifier.send(f"⚠️ Manual Exit Detected\nSymbol: {self.symbol_canonical}\nPosition was closed externally on the exchange.")
                 except Exception as e:
