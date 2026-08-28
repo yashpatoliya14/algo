@@ -233,8 +233,23 @@ class DeltaClient:
 
     def cancel_all_orders(self, symbol: str) -> dict:
         """Cancel all pending open orders for a symbol."""
-        payload = {"product_symbol": symbol}
-        return self._request("DELETE", "/v2/orders/all", payload=payload, auth=True)
+        if not hasattr(self, '_product_map'):
+            self._product_map = {}
+            try:
+                for p in self.get_products():
+                    self._product_map[p.get("symbol")] = p.get("id")
+            except Exception:
+                pass
+                
+        product_id = self._product_map.get(symbol)
+        
+        if product_id:
+            # Delta API typically requires product_id to cancel all orders for a specific product
+            payload = {"product_id": product_id}
+            return self._request("DELETE", "/v2/orders/all", params=payload, payload=payload, auth=True)
+        else:
+            payload = {"product_symbol": symbol}
+            return self._request("DELETE", "/v2/orders/all", payload=payload, auth=True)
 
 
 # ============================================================================
