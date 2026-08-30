@@ -660,7 +660,7 @@ class DeltaTrader:
                 exit_price = curr_price
                 pnl = (exit_price - self.active_position["entry_price"]) * self.active_position["size"] if direction == "long" else (self.active_position["entry_price"] - exit_price) * self.active_position["size"]
                 if not self.dry_run:
-                    self.client.cancel_all_orders(self.symbol)
+                    self.cancel_algo_orders(self.active_position)
                     self.client.place_order(self.symbol, self.active_position["size"], "sell" if direction == "long" else "buy", "market_order", reduce_only=True)
                 self.active_position = None
                 try:
@@ -706,12 +706,9 @@ class DeltaTrader:
         if pos_size != 0 or self.active_position is not None:
             if not self.dry_run and pos_size == 0:
                 print(f"  [{self.symbol_canonical}] [STATE] Position was closed externally on the exchange. Clearing local state.")
-                # Cancel any lingering stop-loss / limit orders left from entry
-                try:
-                    self.client.cancel_all_orders(self.symbol)
-                    print(f"  [{self.symbol_canonical}] [STATE] Cancelled all pending orders for {self.symbol}.")
-                except Exception as e:
-                    print(f"  [{self.symbol_canonical}] [WARN] Failed to cancel pending orders: {e}")
+                # Cancel only the algo's stop-loss order — not all user orders
+                self.cancel_algo_orders(self.active_position)
+                print(f"  [{self.symbol_canonical}] [STATE] Cancelled algo stop-loss order for {self.symbol}.")
                 try:
                     self.notifier.send(f"⚠️ Manual Exit Detected\nSymbol: {self.symbol_canonical}\nPosition was closed externally on the exchange.")
                 except Exception as e:
@@ -1014,7 +1011,7 @@ class DeltaTrader:
                 pnl = (exit_price - entry_px) * pos["size"]
                 print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
                 if not self.dry_run:
-                    self.client.cancel_all_orders(self.symbol)
+                    self.cancel_algo_orders(pos)
                     self.client.place_order(self.symbol, pos["size"], "sell", "market_order", reduce_only=True)
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 self.active_position = None
@@ -1069,7 +1066,7 @@ class DeltaTrader:
                 pnl = (entry_px - exit_price) * pos["size"]
                 print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
                 if not self.dry_run:
-                    self.client.cancel_all_orders(self.symbol)
+                    self.cancel_algo_orders(pos)
                     self.client.place_order(self.symbol, pos["size"], "buy", "market_order", reduce_only=True)
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 self.active_position = None
