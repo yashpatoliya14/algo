@@ -231,8 +231,12 @@ class DeltaClient:
 
         return self._request("POST", "/v2/orders", payload=payload, auth=True)
 
+    def cancel_order_by_id(self, order_id: int | str) -> dict:
+        """Cancel a single order by its ID."""
+        return self._request("DELETE", f"/v2/orders/{order_id}", auth=True)
+
     def cancel_all_orders(self, symbol: str) -> dict:
-        """Cancel all pending open orders for a symbol."""
+        """Cancel ALL pending open orders for a symbol (use sparingly — prefer cancel_order_by_id)."""
         if not hasattr(self, '_product_map'):
             self._product_map = {}
             try:
@@ -244,9 +248,10 @@ class DeltaClient:
         product_id = self._product_map.get(symbol)
         
         if product_id:
-            # Delta API typically requires product_id to cancel all orders for a specific product
+            # Delta API expects product_id in the request body only (not as a query param).
+            # Passing it as params would add ?product_id=X to the URL and break the signature.
             payload = {"product_id": product_id}
-            return self._request("DELETE", "/v2/orders/all", params=payload, payload=payload, auth=True)
+            return self._request("DELETE", "/v2/orders/all", payload=payload, auth=True)
         else:
             payload = {"product_symbol": symbol}
             return self._request("DELETE", "/v2/orders/all", payload=payload, auth=True)
@@ -862,12 +867,13 @@ class DeltaTrader:
                 self.client.set_leverage(self.symbol, self.leverage)
                 # Place market entry order
                 entry_res = self.client.place_order(self.symbol, contracts, side, "market_order")
-                print(f"  [LIVE ORDER] Entry Order Placed: {entry_res.get('id')}")
+                print(f"  [LIVE ORDER] Entry Order Placed: {entry_res.get('result', {}).get('id', entry_res.get('id'))}")
 
                 # Place stop loss order
                 exit_side = "sell" if direction == "long" else "buy"
                 stop_res = self.client.place_order(self.symbol, contracts, exit_side, "stop_market_order", stop_price=stop_price, reduce_only=True)
-                print(f"  [LIVE ORDER] Stop Loss Placed: {stop_res.get('id')}")
+                stop_order_id = stop_res.get('result', {}).get('id') or stop_res.get('id')
+                print(f"  [LIVE ORDER] Stop Loss Placed: {stop_order_id}")
 
                 self.active_position = {
                     "direction": direction,
@@ -878,6 +884,7 @@ class DeltaTrader:
                     "size": contracts,
                     "type": signal_type,
                     "init_risk": stop_dist,  # needed for R-multiple trailing (matches backtest)
+                    "stop_order_id": stop_order_id,  # track for targeted cancellation on exit
                 }
                 try:
                     self.notifier.signal_detailed(
