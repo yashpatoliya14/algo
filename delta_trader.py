@@ -908,28 +908,32 @@ class DeltaTrader:
                 raise  # Re-raise so run_trading_cycle knows the entry failed
 
     def cancel_algo_orders(self, pos: dict | None = None):
-        """Cancel only the stop-loss order this algo placed — NOT all orders on the symbol.
+        """Cancel the stop-loss order this algo placed, with guaranteed fallback.
         
-        Uses the tracked stop_order_id from active_position for surgical cancellation.
-        Falls back to cancel-all only for recovered positions with no tracked order ID.
+        1. Try surgical cancel by tracked stop_order_id.
+        2. If that fails OR no ID is tracked, fall back to cancel_all_orders
+           to ensure no orphaned stop orders remain on the exchange.
         """
         pos = pos or self.active_position
         stop_order_id = pos.get("stop_order_id") if pos else None
+        cancelled = False
 
         if stop_order_id:
             try:
                 self.client.cancel_order_by_id(stop_order_id)
                 print(f"  [ORDER] Cancelled algo stop-loss order #{stop_order_id}")
+                cancelled = True
             except Exception as e:
-                # Order may have already been filled/cancelled — log and continue
                 print(f"  [WARN] Could not cancel stop-loss order #{stop_order_id}: {e}")
-        else:
-            # No order ID tracked (e.g. recovered position) — fall back to cancel-all
-            print(f"  [ORDER] No stop_order_id tracked for {self.symbol_canonical}, falling back to cancel-all.")
+
+        if not cancelled:
+            # Fallback: cancel all open orders for this symbol to guarantee cleanup
+            print(f"  [ORDER] Falling back to cancel-all for {self.symbol_canonical} to ensure no orphaned stops.")
             try:
                 self.client.cancel_all_orders(self.symbol)
+                print(f"  [ORDER] cancel_all_orders succeeded for {self.symbol}.")
             except Exception as e:
-                print(f"  [WARN] cancel_all_orders fallback failed: {e}")
+                print(f"  [WARN] cancel_all_orders fallback also failed: {e}")
 
     def _get_candle_ts(self, curr_bar) -> int:
         """Extract integer timestamp from a candle bar (used for cooldown tracking)."""
