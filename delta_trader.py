@@ -910,6 +910,30 @@ class DeltaTrader:
                 print(f"  \033[91m[ORDER FAILED]\033[0m {e}")
                 raise  # Re-raise so run_trading_cycle knows the entry failed
 
+    def cancel_algo_orders(self, pos: dict | None = None):
+        """Cancel only the stop-loss order this algo placed — NOT all orders on the symbol.
+        
+        Uses the tracked stop_order_id from active_position for surgical cancellation.
+        Falls back to cancel-all only for recovered positions with no tracked order ID.
+        """
+        pos = pos or self.active_position
+        stop_order_id = pos.get("stop_order_id") if pos else None
+
+        if stop_order_id:
+            try:
+                self.client.cancel_order_by_id(stop_order_id)
+                print(f"  [ORDER] Cancelled algo stop-loss order #{stop_order_id}")
+            except Exception as e:
+                # Order may have already been filled/cancelled — log and continue
+                print(f"  [WARN] Could not cancel stop-loss order #{stop_order_id}: {e}")
+        else:
+            # No order ID tracked (e.g. recovered position) — fall back to cancel-all
+            print(f"  [ORDER] No stop_order_id tracked for {self.symbol_canonical}, falling back to cancel-all.")
+            try:
+                self.client.cancel_all_orders(self.symbol)
+            except Exception as e:
+                print(f"  [WARN] cancel_all_orders fallback failed: {e}")
+
     def _get_candle_ts(self, curr_bar) -> int:
         """Extract integer timestamp from a candle bar (used for cooldown tracking)."""
         candle_time = getattr(curr_bar, "name", None)
