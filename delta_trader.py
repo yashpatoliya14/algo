@@ -966,7 +966,7 @@ class DeltaTrader:
         atr_val = curr_bar["atr"]
 
         if direction == "long":
-            pos["peak_price"] = max(pos["peak_price"], curr_bar["high"])
+            pos["peak_price"] = max(pos["peak_price"], current_price)  # live mark price captures intra-candle spikes
             r_now = (curr_bar["close"] - entry_px) / init_risk if init_risk > 0 else 0
 
             # --- Percentage trailing stop (1% → 0.4%) ---
@@ -1021,7 +1021,7 @@ class DeltaTrader:
                     pass
 
         else:  # Short position
-            pos["peak_price"] = min(pos["peak_price"], curr_bar["low"])
+            pos["peak_price"] = min(pos["peak_price"], current_price)  # live mark price captures intra-candle drops
             r_now = (entry_px - curr_bar["close"]) / init_risk if init_risk > 0 else 0
 
             # --- Percentage trailing stop (1% → 0.4%) ---
