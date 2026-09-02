@@ -234,9 +234,24 @@ class DeltaClient:
 
         return self._request("POST", "/v2/orders", payload=payload, auth=True)
 
-    def cancel_order_by_id(self, order_id: int | str) -> dict:
+    def cancel_order_by_id(self, order_id: int | str, product_id: int = None, symbol: str = None) -> dict:
         """Cancel a single order by its ID."""
-        return self._request("DELETE", f"/v2/orders/{order_id}", auth=True)
+        payload = {"id": int(order_id) if str(order_id).isdigit() else order_id}
+        
+        if not product_id and symbol:
+            if not hasattr(self, '_product_map'):
+                self._product_map = {}
+                try:
+                    for p in self.get_products():
+                        self._product_map[p.get("symbol")] = p.get("id")
+                except Exception:
+                    pass
+            product_id = self._product_map.get(symbol)
+            
+        if product_id:
+            payload["product_id"] = product_id
+            
+        return self._request("DELETE", "/v2/orders", payload=payload, auth=True)
 
     def cancel_all_orders(self, symbol: str) -> dict:
         """Cancel ALL pending open orders for a symbol (use sparingly — prefer cancel_order_by_id)."""
@@ -462,7 +477,7 @@ class DeltaTrader:
                         stop_order_id = local_pos.get("stop_order_id")
                         if stop_order_id:
                             try:
-                                self.client.cancel_order_by_id(stop_order_id)
+                                self.client.cancel_order_by_id(stop_order_id, symbol=delta_sym)
                                 print(f"  [{canon_sym}] [STATE] Cancelled algo stop-loss order #{stop_order_id}.")
                             except Exception as e:
                                 print(f"  [{canon_sym}] [WARN] Failed to cancel algo stop order during reconciliation: {e}")
@@ -967,7 +982,7 @@ class DeltaTrader:
 
         if stop_order_id:
             try:
-                self.client.cancel_order_by_id(stop_order_id)
+                self.client.cancel_order_by_id(stop_order_id, symbol=self.symbol)
                 print(f"  [ORDER] Cancelled algo stop-loss order #{stop_order_id}")
                 cancelled = True
             except Exception as e:

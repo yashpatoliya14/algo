@@ -79,7 +79,7 @@ def main():
     # 4. Cancel the Limit Order by ID (testing specific cancellation)
     print(f"\n  {CYAN}[4/4] Testing Targeted Cancellation (cancel_order_by_id)...{RESET}")
     try:
-        cancel_res = client.cancel_order_by_id(order_id)
+        cancel_res = client.cancel_order_by_id(order_id, symbol=symbol)
         print(f"  {GREEN}[OK] LIMIT ORDER #{order_id} CANCELLED CLEANLY!{RESET}")
         print(f"    Cancellation response state: {cancel_res.get('state', cancel_res.get('result', {}).get('state', 'cancelled'))}")
     except Exception as e:
