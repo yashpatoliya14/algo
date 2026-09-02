@@ -200,11 +200,11 @@ class DeltaClient:
         payload = {"leverage": str(leverage)}
         return self._request("POST", f"/v2/products/{product_id}/orders/leverage", payload=payload, auth=True)
 
-    def place_order(self, symbol: str, size: int, side: str, order_type: str = "market_order", stop_price: float = None, reduce_only: bool = False) -> dict:
+    def place_order(self, symbol: str, size: int, side: str, order_type: str = "market_order", stop_price: float = None, limit_price: float = None, reduce_only: bool = False) -> dict:
         """
         Place an order on Delta Exchange.
         side: 'buy' or 'sell'
-        order_type: 'market_order' or 'stop_market_order'
+        order_type: 'market_order', 'limit_order', or 'stop_market_order'
         """
         actual_order_type = order_type
         stop_order_type = None
@@ -225,6 +225,9 @@ class DeltaClient:
             
         if stop_price is not None:
             payload["stop_price"] = str(round(stop_price, 2))
+            
+        if limit_price is not None:
+            payload["limit_price"] = str(round(limit_price, 2))
             
         if reduce_only:
             payload["reduce_only"] = True
@@ -359,6 +362,33 @@ class DeltaTrader:
         except Exception as e:
             print(f"  [WARN] Failed to load state from disk: {e}")
 
+    def record_order(self, order_type: str, symbol: str, order_id: str, details: dict):
+        """Record all limit and stop orders in a file as requested by user."""
+        try:
+            os.makedirs("cache", exist_ok=True)
+            order_log_file = "cache/orders.log"
+            
+            # Dynamic Log Rotation for 24/7 VM running
+            # Check if file is > 1MB. If so, rename it to .old.log
+            if os.path.exists(order_log_file) and os.path.getsize(order_log_file) > 1 * 1024 * 1024:
+                old_log_file = "cache/orders.old.log"
+                if os.path.exists(old_log_file):
+                    os.remove(old_log_file)
+                os.rename(order_log_file, old_log_file)
+
+            timestamp = datetime.now(timezone.utc).isoformat()
+            log_entry = json.dumps({
+                "timestamp": timestamp,
+                "type": order_type,
+                "symbol": symbol,
+                "order_id": order_id,
+                **details
+            })
+            with open(order_log_file, "a") as f:
+                f.write(log_entry + "\n")
+        except Exception as e:
+            print(f"  [WARN] Failed to record order to file: {e}")
+
     def reconcile_positions(self):
         """Reconcile local state with open positions on Delta Exchange."""
         if self.dry_run:
@@ -428,12 +458,14 @@ class DeltaTrader:
                     # No position on exchange
                     if local_pos:
                         print(f"  [{canon_sym}] [WARN] Local state has active position but none found on exchange. Clearing local position.")
-                        # Cancel any lingering stop-loss / limit orders for this symbol
-                        try:
-                            self.client.cancel_all_orders(delta_sym)
-                            print(f"  [{canon_sym}] [STATE] Cancelled all pending orders for {delta_sym}.")
-                        except Exception as e:
-                            print(f"  [{canon_sym}] [WARN] Failed to cancel orders during reconciliation: {e}")
+                        # Cancel ONLY the tracked algo stop order to avoid cancelling manual user orders
+                        stop_order_id = local_pos.get("stop_order_id")
+                        if stop_order_id:
+                            try:
+                                self.client.cancel_order_by_id(stop_order_id)
+                                print(f"  [{canon_sym}] [STATE] Cancelled algo stop-loss order #{stop_order_id}.")
+                            except Exception as e:
+                                print(f"  [{canon_sym}] [WARN] Failed to cancel algo stop order during reconciliation: {e}")
                         self.positions.pop(canon_sym, None)
                         state_changed = True
             
@@ -864,13 +896,28 @@ class DeltaTrader:
                 self.client.set_leverage(self.symbol, self.leverage)
                 # Place market entry order
                 entry_res = self.client.place_order(self.symbol, contracts, side, "market_order")
-                print(f"  [LIVE ORDER] Entry Order Placed: {entry_res.get('result', {}).get('id', entry_res.get('id'))}")
+                entry_order_id = entry_res.get('result', {}).get('id', entry_res.get('id'))
+                print(f"  [LIVE ORDER] Entry Order Placed: {entry_order_id}")
+                self.record_order("market_order", self.symbol, str(entry_order_id), {
+                    "direction": direction,
+                    "side": side,
+                    "size": contracts
+                })
 
                 # Place stop loss order
                 exit_side = "sell" if direction == "long" else "buy"
                 stop_res = self.client.place_order(self.symbol, contracts, exit_side, "stop_market_order", stop_price=stop_price, reduce_only=True)
                 stop_order_id = stop_res.get('result', {}).get('id') or stop_res.get('id')
                 print(f"  [LIVE ORDER] Stop Loss Placed: {stop_order_id}")
+                
+                # Record to file
+                self.record_order("stop_market_order", self.symbol, str(stop_order_id), {
+                    "direction": direction,
+                    "side": exit_side,
+                    "size": contracts,
+                    "stop_price": stop_price,
+                    "reduce_only": True
+                })
 
                 self.active_position = {
                     "direction": direction,
@@ -927,13 +974,7 @@ class DeltaTrader:
                 print(f"  [WARN] Could not cancel stop-loss order #{stop_order_id}: {e}")
 
         if not cancelled:
-            # Fallback: cancel all open orders for this symbol to guarantee cleanup
-            print(f"  [ORDER] Falling back to cancel-all for {self.symbol_canonical} to ensure no orphaned stops.")
-            try:
-                self.client.cancel_all_orders(self.symbol)
-                print(f"  [ORDER] cancel_all_orders succeeded for {self.symbol}.")
-            except Exception as e:
-                print(f"  [WARN] cancel_all_orders fallback also failed: {e}")
+            print(f"  [ORDER] Could not cancel stop_order_id #{stop_order_id}. Skipping cancel_all_orders to avoid closing user limit orders.")
 
     def _get_candle_ts(self, curr_bar) -> int:
         """Extract integer timestamp from a candle bar (used for cooldown tracking)."""
@@ -1016,7 +1057,15 @@ class DeltaTrader:
                 print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
                 if not self.dry_run:
                     self.cancel_algo_orders(pos)
-                    self.client.place_order(self.symbol, pos["size"], "sell", "market_order", reduce_only=True)
+                    exit_res = self.client.place_order(self.symbol, pos["size"], "sell", "market_order", reduce_only=True)
+                    exit_order_id = exit_res.get('result', {}).get('id', exit_res.get('id'))
+                    self.record_order("market_order", self.symbol, str(exit_order_id), {
+                        "direction": direction,
+                        "side": "sell",
+                        "size": pos["size"],
+                        "reduce_only": True,
+                        "reason": reason
+                    })
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 self.active_position = None
                 try:
@@ -1071,7 +1120,15 @@ class DeltaTrader:
                 print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
                 if not self.dry_run:
                     self.cancel_algo_orders(pos)
-                    self.client.place_order(self.symbol, pos["size"], "buy", "market_order", reduce_only=True)
+                    exit_res = self.client.place_order(self.symbol, pos["size"], "buy", "market_order", reduce_only=True)
+                    exit_order_id = exit_res.get('result', {}).get('id', exit_res.get('id'))
+                    self.record_order("market_order", self.symbol, str(exit_order_id), {
+                        "direction": direction,
+                        "side": "buy",
+                        "size": pos["size"],
+                        "reduce_only": True,
+                        "reason": reason
+                    })
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 self.active_position = None
                 try:
