@@ -66,6 +66,8 @@ def main():
 
     # 5. Run reconciliation (The bot should detect position is gone, and cancel the SL)
     print(f"  {CYAN}[5/5] Triggering reconcile_positions()... Watch for SL cancellation!{RESET}")
+    # Populate symbols list for the trader so it knows what to reconcile
+    trader.symbols = [{"delta": symbol, "canon": canon_sym}]
     trader.reconcile_positions()
     
     if canon_sym not in trader.positions:
