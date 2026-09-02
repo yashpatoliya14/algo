@@ -970,11 +970,10 @@ class DeltaTrader:
                 raise  # Re-raise so run_trading_cycle knows the entry failed
 
     def cancel_algo_orders(self, pos: dict | None = None):
-        """Cancel the stop-loss order this algo placed, with guaranteed fallback.
+        """Cancel the stop-loss order this algo placed.
         
-        1. Try surgical cancel by tracked stop_order_id.
-        2. If that fails OR no ID is tracked, fall back to cancel_all_orders
-           to ensure no orphaned stop orders remain on the exchange.
+        Uses surgical cancel by tracked stop_order_id.
+        No longer falls back to cancel_all_orders to avoid closing user manual limit orders.
         """
         pos = pos or self.active_position
         stop_order_id = pos.get("stop_order_id") if pos else None
