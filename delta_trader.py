@@ -33,6 +33,7 @@ import requests
 
 from trend_rider_engine import (
     TrendRiderParams,
+    _calc_adaptive_sl,
     compute_indicators,
     supertrend_full,
 )
@@ -310,6 +311,12 @@ class DeltaTrader:
             risk_pct=self.risk_pct,
             trail_pct_activation=float(get_env_stripped("TRAIL_PCT_ACTIVATION", "0.5")),
             trail_pct_distance=float(get_env_stripped("TRAIL_PCT_DISTANCE", "0.3")),
+            # Adaptive SL parameters
+            max_sl_pct=float(get_env_stripped("MAX_SL_PCT", "1.5")),
+            min_sl_atr_mult=float(get_env_stripped("MIN_SL_ATR_MULT", "0.5")),
+            pullback_sl_buffer=float(get_env_stripped("PULLBACK_SL_BUFFER", "0.3")),
+            breakout_sl_buffer=float(get_env_stripped("BREAKOUT_SL_BUFFER", "0.5")),
+            trend_sl_buffer=float(get_env_stripped("TREND_SL_BUFFER", "0.3")),
         )
 
         self.client = DeltaClient(self.api_key, self.api_secret, self.base_url)
@@ -523,6 +530,12 @@ class DeltaTrader:
         print(f"  Risk Per Trade:        {self.risk_pct}%")
         print(f"  Leverage:              {self.leverage}x")
         print(f"  Trailing Trigger:      {self.params.trail_pct_activation}% move -> {self.params.trail_pct_distance}% trail")
+        print(f"  Stop Loss Mode:        Adaptive (structure-based)")
+        print(f"    Max SL Cap:          {self.params.max_sl_pct}% of price")
+        print(f"    Min SL Floor:        {self.params.min_sl_atr_mult}x ATR")
+        print(f"    Pullback SL buffer:  {self.params.pullback_sl_buffer}x ATR below swing low")
+        print(f"    Breakout SL buffer:  {self.params.breakout_sl_buffer}x ATR from Donchian")
+        print(f"    FreshTrend SL buf:   {self.params.trend_sl_buffer}x ATR from Supertrend")
         print(f"  API Base URL:          {self.base_url}")
         print("=" * 65)
         print()
@@ -812,7 +825,7 @@ class DeltaTrader:
                 else:
                     # Attempt entry — only mark as processed if successful
                     try:
-                        self._execute_entry(signal, signal_type, curr_bar, curr_price)
+                        self._execute_entry(signal, signal_type, curr_bar, curr_price, df)
                         # Mark signal as processed ONLY after successful execution
                         self._notified_signals.add(sig_key)
                         # Prune old keys to prevent memory leak (keep last 50 per symbol)
@@ -821,17 +834,15 @@ class DeltaTrader:
                     except Exception as e:
                         print(f"  [{self.symbol_canonical}] \033[91m[ENTRY FAILED]\033[0m {e} — will retry on next poll.")
 
-    def _execute_entry(self, direction: str, signal_type: str, curr_bar, current_price: float):
+    def _execute_entry(self, direction: str, signal_type: str, curr_bar, current_price: float, df: pd.DataFrame = None):
         """Calculate size, place market order and initial stop loss."""
         atr_val = curr_bar["atr"]
-        stop_dist = self.params.stop_atr_mult * atr_val
 
-        if direction == "long":
-            stop_price = current_price - stop_dist
-            side = "buy"
-        else:
-            stop_price = current_price + stop_dist
-            side = "sell"
+        # Adaptive, structure-based stop loss
+        stop_price = self._calculate_sl_price(direction, signal_type, current_price, curr_bar, df)
+        stop_dist = abs(current_price - stop_price)
+
+        side = "buy" if direction == "long" else "sell"
 
         # Position sizing
         equity = 10000.0  # default paper capital if dry run
@@ -866,12 +877,13 @@ class DeltaTrader:
             # Legacy simple logic
             contracts = max(1, int(risk_amount / stop_dist))
 
+        sl_pct = stop_dist / current_price * 100.0
         print(f"\n  \033[96m>>> EXECUTING ENTRY <<<\033[0m")
         print(f"  Direction:   {direction.upper()}")
         print(f"  Side:        {side.upper()}")
         print(f"  Contracts:   {contracts}")
         print(f"  Entry Price: ${current_price:,.2f}")
-        print(f"  Stop Loss:   ${stop_price:,.2f} (Dist: ${stop_dist:,.2f})")
+        print(f"  Stop Loss:   ${stop_price:,.2f} (Dist: ${stop_dist:,.2f} / {sl_pct:.2f}%)  [signal={signal_type}]")
 
         if self.dry_run:
             print("  \033[93m[DRY RUN] Order simulated successfully!\033[0m")
@@ -968,6 +980,43 @@ class DeltaTrader:
             except Exception as e:
                 print(f"  \033[91m[ORDER FAILED]\033[0m {e}")
                 raise  # Re-raise so run_trading_cycle knows the entry failed
+
+    def _calculate_sl_price(
+        self,
+        direction: str,
+        signal_type: str,
+        entry_price: float,
+        curr_bar,
+        df: pd.DataFrame = None,
+    ) -> float:
+        """Adaptive, structure-based stop-loss calculation for live trading.
+
+        Delegates to _calc_adaptive_sl() from trend_rider_engine, using the
+        same logic as the backtest engine to ensure live/backtest parity.
+
+        Requires the last completed candle row (curr_bar = d.iloc[-2]) and
+        the previous bar (d.iloc[-3]) for swing structure.
+        """
+        # Reconstruct a 'prev_row' from the dataframe (same bar the backtest uses)
+        prev_bar = curr_bar  # safe fallback if df unavailable
+        if df is not None and len(df) >= 4:
+            try:
+                from trend_rider_engine import compute_indicators
+                d = compute_indicators(df, self.params)
+                d = d.dropna(subset=["ema_fast", "atr", "st_dir"])
+                if len(d) >= 3:
+                    prev_bar = d.iloc[-3]  # bar before the signal bar
+            except Exception:
+                pass  # fall through to curr_bar fallback
+
+        return _calc_adaptive_sl(
+            direction=direction,
+            signal_type=signal_type,
+            entry_price=entry_price,
+            row=curr_bar,
+            prev_row=prev_bar,
+            p=self.params,
+        )
 
     def cancel_algo_orders(self, pos: dict | None = None):
         """Cancel the stop-loss order this algo placed.

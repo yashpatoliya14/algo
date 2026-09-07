@@ -102,7 +102,7 @@ class TrendRiderParams:
     rsi_ob: float = 78.0
     rsi_os: float = 22.0
     donchian_period: int = 30
-    stop_atr_mult: float = 2.0
+    stop_atr_mult: float = 2.0        # Legacy fallback multiplier (used only if no structural SL found)
     trail_be_buffer: float = 0.2
     trail_phase2_mult: float = 2.5
     trail_phase3_mult: float = 1.8
@@ -110,6 +110,13 @@ class TrendRiderParams:
     trail_pct_distance: float = 0.3    # Trail 0.3% behind peak price
     risk_pct: float = 1.5
     cooldown_bars: int = 3
+    # ---- Adaptive, structure-based SL parameters ----
+    max_sl_pct: float = 1.5           # Hard cap: SL never wider than this % of entry price
+    min_sl_atr_mult: float = 0.5      # Floor: SL always at least this many ATRs wide
+    pullback_sl_bars: int = 2         # Lookback bars to find swing low/high for pullback SL
+    pullback_sl_buffer: float = 0.3   # ATR buffer subtracted from swing low (added to swing high for shorts)
+    breakout_sl_buffer: float = 0.5   # ATR buffer from Donchian band for breakout SL
+    trend_sl_buffer: float = 0.3      # ATR buffer from Supertrend line for fresh_trend SL
 
 
 # ============================================================================
@@ -286,7 +293,7 @@ def run_trend_rider_backtest(df4h: pd.DataFrame, p: TrendRiderParams = None, cap
 
             if signal is not None:
                 entry_price = row["close"]
-                stop = entry_price - p.stop_atr_mult * atr_val if signal == "long" else entry_price + p.stop_atr_mult * atr_val
+                stop = _calc_adaptive_sl(signal, signal_type, entry_price, row, prev_row, p)
                 risk_dist = abs(entry_price - stop)
                 if risk_dist > 0:
                     qty = (equity * (p.risk_pct / 100)) / risk_dist
@@ -323,6 +330,78 @@ def _calc_pnl(trade: Trade, exit_price: float) -> float:
         return trade.qty * (exit_price - trade.entry_price)
     else:
         return trade.qty * (trade.entry_price - exit_price)
+
+
+def _calc_adaptive_sl(
+    direction: str,
+    signal_type: str,
+    entry_price: float,
+    row,
+    prev_row,
+    p: TrendRiderParams,
+) -> float:
+    """Calculate an adaptive, structure-based stop-loss price.
+
+    Priority:
+      - pullback  → below/above swing low/high of last 2 bars + ATR buffer
+      - breakout  → below/above the broken Donchian band + ATR buffer
+      - fresh_trend → at the Supertrend line + ATR buffer
+      - fallback  → 1.5×ATR (legacy-style but tighter)
+
+    Always enforces:
+      - Minimum distance of min_sl_atr_mult × ATR
+      - Hard cap of max_sl_pct% of entry price
+    """
+    atr_val = row["atr"]
+
+    if signal_type == "pullback":
+        # Use the most recent swing structure: low of current + prev bar
+        if direction == "long":
+            swing = min(row["low"], prev_row["low"])
+            raw_sl = swing - p.pullback_sl_buffer * atr_val
+        else:
+            swing = max(row["high"], prev_row["high"])
+            raw_sl = swing + p.pullback_sl_buffer * atr_val
+
+    elif signal_type == "breakout":
+        # SL below/above the Donchian level that was broken
+        if direction == "long":
+            donchian_ref = row.get("donchian_high", entry_price)
+            raw_sl = donchian_ref - p.breakout_sl_buffer * atr_val
+        else:
+            donchian_ref = row.get("donchian_low", entry_price)
+            raw_sl = donchian_ref + p.breakout_sl_buffer * atr_val
+
+    elif signal_type == "fresh_trend":
+        # SL at the Supertrend line (the structural invalidation point)
+        st_val = row.get("st_val", None)
+        if st_val is not None and not (isinstance(st_val, float) and np.isnan(st_val)):
+            if direction == "long":
+                raw_sl = st_val - p.trend_sl_buffer * atr_val
+            else:
+                raw_sl = st_val + p.trend_sl_buffer * atr_val
+        else:
+            raw_sl = entry_price - 1.5 * atr_val if direction == "long" else entry_price + 1.5 * atr_val
+
+    else:
+        # Manual / unknown: use legacy 1.5×ATR as sensible default
+        raw_sl = entry_price - 1.5 * atr_val if direction == "long" else entry_price + 1.5 * atr_val
+
+    # Enforce minimum SL distance (floor)
+    min_dist = p.min_sl_atr_mult * atr_val
+    if direction == "long":
+        raw_sl = min(raw_sl, entry_price - min_dist)
+    else:
+        raw_sl = max(raw_sl, entry_price + min_dist)
+
+    # Enforce hard cap (never wider than max_sl_pct% of price)
+    max_dist = entry_price * (p.max_sl_pct / 100.0)
+    if direction == "long":
+        raw_sl = max(raw_sl, entry_price - max_dist)
+    else:
+        raw_sl = min(raw_sl, entry_price + max_dist)
+
+    return raw_sl
 
 
 # ============================================================================
