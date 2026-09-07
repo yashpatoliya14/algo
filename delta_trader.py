@@ -1386,8 +1386,6 @@ class DeltaTrader:
         except Exception:
             pass
             
-        last_status_sent = time.time()
-        last_6h_status_sent = time.time() - (6 * 3600) + 60 # trigger 1 minute after start
         last_processed_update_id = 0
         
         # Flush old updates
@@ -1432,8 +1430,6 @@ class DeltaTrader:
                                 _, cid = cb_data.split("_")
                                 self.notifier.send(f"To update SL for {cid.upper()}, please send the command:\n`/sl {cid.upper()} <price>`", parse_mode="Markdown")
                         elif msg_text:
-                            if msg_text in ["/logs", "logs"]:
-                                last_6h_status_sent = 0
                             parts = msg_text.split()
                             
                         if len(parts) >= 3 and parts[0] == "/sl" and parts[1].startswith("c"):
@@ -1483,65 +1479,6 @@ class DeltaTrader:
                                         self.notifier.send(f"❌ Already clear for {sym_canon}.")
                             except Exception:
                                 pass
-
-                # Send 12-hour startup log update
-                if time.time() - last_status_sent >= 12 * 3600:
-                    try:
-                        symbols_list = [s["canon"] for s in self.symbols]
-                        self.notifier.started(symbols_list, self.timeframe, self.dry_run, self.risk_pct, self.leverage)
-                    except Exception:
-                        pass
-                    last_status_sent = time.time()
-
-                # Send 6-hour professional open positions status
-                if time.time() - last_6h_status_sent >= 6 * 3600:
-                    lines = ["🌟 *CRYPTO ALGO STATUS* 🌟\n_Open Positions:_"]
-                    keyboard = []
-                    
-                    for idx, sym in enumerate(self.symbols):
-                        canon = sym["canon"]
-                        pos = self.positions.get(canon)
-                        if pos:
-                            direction = pos["direction"].upper()
-                            pnl_str = f"PnL: Unknown"
-                            try:
-                                ticker = self.client.get_ticker(sym["delta"])
-                                curr_px = float(ticker.get("mark_price", pos["entry_price"]))
-                                if pos["direction"] == "long":
-                                    pnl = (curr_px - pos["entry_price"]) * pos["size"]
-                                else:
-                                    pnl = (pos["entry_price"] - curr_px) * pos["size"]
-                                pnl_str = f"PnL: {pnl:+.2f} USDT"
-                            except Exception:
-                                pass
-                            lines.append(f"🔹 `[C{idx+1}]` *{canon}* {direction} | Size: {pos['size']} | {pnl_str} | SL: {pos.get('trail_stop', 0):.2f}")
-                            
-                            # Add buttons for active position
-                            keyboard.append([
-                                {"text": f"Close C{idx+1}", "callback_data": f"close_c{idx+1}"},
-                                {"text": f"Update SL C{idx+1}", "callback_data": f"sl_c{idx+1}"}
-                            ])
-                            keyboard.append([
-                                {"text": f"Clear C{idx+1}", "callback_data": f"clear_c{idx+1}"},
-                                {"text": f"Force Long", "callback_data": f"open_c{idx+1}_long"},
-                                {"text": f"Force Short", "callback_data": f"open_c{idx+1}_short"}
-                            ])
-                        else:
-                            lines.append(f"🔸 `[C{idx+1}]` *{canon}* None")
-                            
-                            # Add buttons to open new position
-                            keyboard.append([
-                                {"text": f"Long C{idx+1}", "callback_data": f"open_c{idx+1}_long"},
-                                {"text": f"Short C{idx+1}", "callback_data": f"open_c{idx+1}_short"}
-                            ])
-                            
-                    reply_markup = {"inline_keyboard": keyboard}
-                    
-                    try:
-                        self.notifier.send("\n".join(lines), parse_mode="Markdown", reply_markup=reply_markup)
-                    except Exception:
-                        pass
-                    last_6h_status_sent = time.time()
 
                 cycle_count += 1
                 cycle_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
