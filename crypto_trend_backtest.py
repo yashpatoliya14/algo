@@ -97,11 +97,16 @@ def choppiness_index(df: pd.DataFrame, period: int = 14) -> pd.Series:
 # DATA FETCHING (ccxt)
 # ============================================================================
 
+_exchange_cache = {}
+
 def fetch_ohlcv(exchange_id: str, symbol: str, timeframe: str, since_ms: int, until_ms: int) -> pd.DataFrame:
     """Fetch complete OHLCV data using CCXT with pagination."""
     import ccxt
 
-    exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
+    if exchange_id not in _exchange_cache:
+        _exchange_cache[exchange_id] = getattr(ccxt, exchange_id)({"enableRateLimit": True})
+    
+    exchange = _exchange_cache[exchange_id]
     all_rows = []
     cursor = since_ms
 
