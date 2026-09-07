@@ -117,6 +117,15 @@ class TrendRiderParams:
     pullback_sl_buffer: float = 0.3   # ATR buffer subtracted from swing low (added to swing high for shorts)
     breakout_sl_buffer: float = 0.5   # ATR buffer from Donchian band for breakout SL
     trend_sl_buffer: float = 0.3      # ATR buffer from Supertrend line for fresh_trend SL
+    # ---- Lower-Timeframe (LTF) confirmation filter ----
+    ltf_enabled: bool = True          # Enable 1H confirmation filter to reduce fake signals
+    ltf_ema_fast: int = 9             # LTF fast EMA period
+    ltf_ema_slow: int = 21            # LTF slow EMA period
+    ltf_rsi_period: int = 14          # LTF RSI period
+    ltf_st_period: int = 10           # LTF Supertrend period
+    ltf_st_mult: float = 2.0          # LTF Supertrend multiplier (tighter than 4H = 3.0)
+    ltf_confirm_mode: str = "majority" # "strict"=4/4, "majority"=3/4, "ema_only"=EMA only
+    ltf_lookback_bars: int = 3        # Number of recent LTF bars to evaluate at signal time
 
 
 # ============================================================================
@@ -151,6 +160,77 @@ def compute_indicators(df: pd.DataFrame, p: TrendRiderParams) -> pd.DataFrame:
     return d
 
 
+def compute_ltf_indicators(df_ltf: pd.DataFrame, p: "TrendRiderParams") -> pd.DataFrame:
+    """Compute LTF (e.g. 1H) indicators used for entry confirmation.
+
+    Returns a DataFrame with columns:
+      ltf_ema_fast, ltf_ema_slow, ltf_rsi, ltf_st_dir, (close already present)
+    """
+    d = df_ltf.copy()
+    d["ltf_ema_fast"] = ema(d["close"], p.ltf_ema_fast)
+    d["ltf_ema_slow"] = ema(d["close"], p.ltf_ema_slow)
+    d["ltf_rsi"]      = rsi(d["close"], p.ltf_rsi_period)
+    ltf_st_dir, _     = supertrend_full(d, p.ltf_st_period, p.ltf_st_mult)
+    d["ltf_st_dir"]   = ltf_st_dir
+    return d
+
+
+def check_ltf_confirmation(direction: str, ltf_bar, p: "TrendRiderParams") -> tuple[bool, str]:
+    """Check whether a single LTF bar confirms the 4H signal direction.
+
+    Returns (confirmed: bool, reason: str).
+
+    Conditions evaluated:
+      1. LTF EMA9 > EMA21 (long) or < EMA21 (short)
+      2. LTF RSI > 50 (long) or < 50 (short)
+      3. LTF Supertrend direction == 1 (long) or == -1 (short)
+      4. LTF close > EMA9 (long) or < EMA9 (short)
+
+    Modes:
+      "strict"   — all 4 must pass
+      "majority" — at least 3/4 must pass  (default)
+      "ema_only" — only condition 1 must pass
+    """
+    try:
+        ema_fast = float(ltf_bar["ltf_ema_fast"])
+        ema_slow = float(ltf_bar["ltf_ema_slow"])
+        ltf_rsi  = float(ltf_bar["ltf_rsi"])
+        st_dir   = int(ltf_bar["ltf_st_dir"])
+        close    = float(ltf_bar["close"])
+    except (KeyError, TypeError, ValueError):
+        return True, "ltf_data_missing(skip_filter)"
+
+    if direction == "long":
+        cond = [
+            ema_fast > ema_slow,   # EMA trend
+            ltf_rsi  > 50,         # RSI momentum
+            st_dir   == 1,         # Supertrend bull
+            close    > ema_fast,   # Price above fast EMA
+        ]
+    else:
+        cond = [
+            ema_fast < ema_slow,
+            ltf_rsi  < 50,
+            st_dir   == -1,
+            close    < ema_fast,
+        ]
+
+    passed = sum(cond)
+    labels = ["ema_trend", "rsi_momentum", "supertrend", "close_vs_ema"]
+    fail_labels = [labels[i] for i, c in enumerate(cond) if not c]
+
+    mode = (p.ltf_confirm_mode or "majority").lower()
+    if mode == "strict":
+        ok = passed == 4
+    elif mode == "ema_only":
+        ok = cond[0]  # EMA trend only
+    else:  # majority (default)
+        ok = passed >= 3
+
+    reason = f"{passed}/4 LTF conds" + (f" [fail: {','.join(fail_labels)}]" if fail_labels else " [all pass]")
+    return ok, reason
+
+
 # ============================================================================
 # TRADE DATACLASS
 # ============================================================================
@@ -179,12 +259,37 @@ class Trade:
 # BACKTEST ENGINE
 # ============================================================================
 
-def run_trend_rider_backtest(df4h: pd.DataFrame, p: TrendRiderParams = None, capital: float = 10000.0):
+def run_trend_rider_backtest(
+    df4h: pd.DataFrame,
+    p: TrendRiderParams = None,
+    capital: float = 10000.0,
+    df_ltf: pd.DataFrame = None,
+):
+    """Run the Trend Rider backtest on 4H data.
+
+    Args:
+        df4h:   4H OHLCV DataFrame (datetime index, UTC)
+        p:      Strategy parameters. Uses defaults if None.
+        capital: Starting equity in USD.
+        df_ltf: Optional lower-timeframe OHLCV DataFrame (e.g. 1H).
+                If provided and p.ltf_enabled=True, each 4H entry signal is
+                confirmed against the last ltf_lookback_bars LTF bars.
+                Must use the same datetime index timezone as df4h.
+    """
     if p is None:
         p = TrendRiderParams()
 
     d = compute_indicators(df4h, p)
     d = d.dropna(subset=["ema_fast", "ema_slow", "atr", "st_dir", "donchian_high"])
+
+    # Pre-compute LTF indicators once if LTF filter is enabled
+    ltf_d = None
+    if df_ltf is not None and p.ltf_enabled and len(df_ltf) >= 20:
+        try:
+            ltf_d = compute_ltf_indicators(df_ltf, p)
+            ltf_d = ltf_d.dropna(subset=["ltf_ema_fast", "ltf_rsi", "ltf_st_dir"])
+        except Exception:
+            ltf_d = None  # LTF unavailable — fall through without filter
 
     equity = capital
     equity_curve = []
@@ -290,6 +395,23 @@ def run_trend_rider_backtest(df4h: pd.DataFrame, p: TrendRiderParams = None, cap
                     signal, signal_type = "short", "breakout"
                 elif is_st_flip:
                     signal, signal_type = "short", "fresh_trend"
+
+            if signal is not None:
+                # --- LTF confirmation filter ---
+                ltf_confirmed = True
+                ltf_reason = "ltf_disabled"
+                if ltf_d is not None and p.ltf_enabled:
+                    # Get the last ltf_lookback_bars LTF rows that closed AT OR BEFORE this 4H candle's timestamp
+                    ltf_slice = ltf_d[ltf_d.index <= t]
+                    if len(ltf_slice) >= 1:
+                        ltf_bar = ltf_slice.iloc[-1]  # most recent closed LTF bar
+                        ltf_confirmed, ltf_reason = check_ltf_confirmation(signal, ltf_bar, p)
+                    else:
+                        ltf_reason = "ltf_no_data(skip_filter)"
+
+                if not ltf_confirmed:
+                    signal = None  # block entry
+                    # signal_type left unchanged for logging if needed
 
             if signal is not None:
                 entry_price = row["close"]

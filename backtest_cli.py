@@ -23,6 +23,8 @@ from trend_rider_engine import (
     TrendRiderParams,
     run_trend_rider_backtest,
     get_metrics,
+    compute_ltf_indicators,
+    check_ltf_confirmation,
 )
 from symbol_utils import to_delta, to_ccxt, to_binance
 
@@ -70,8 +72,9 @@ except Exception:
     CACHE_MAX_AGE_DAYS = 90
 
 STRATEGY_DESC = (
-    "Trend Rider v2 -- Supertrend(10,3) + EMA21/55 trend detection\n"
+    "Trend Rider v3 -- Supertrend(10,3) + EMA21/55 + 1H LTF Filter\n"
     "  Entries: Pullback-to-EMA21 | Donchian-30 Breakout | Supertrend Flip\n"
+    "  LTF Filter: 1H EMA9/21 + RSI50 + Supertrend + Close (majority 3/4)\n"
     "  Trailing Stop: 0.5% Profit Activation -> 0.3% Trailing Stop\n"
     "  No partial exits -- full ride on every trend"
 )
@@ -210,9 +213,70 @@ def fetch_year_data(year: int):
     return df4h
 
 
-def cache_path(year: int, symbol: str = None) -> Path:
+def fetch_ltf_year_data(year: int, ltf_tf: str = "1h") -> pd.DataFrame | None:
+    """Fetch 1H (or other LTF) candles for a full year. Delta -> Binance fallback.
+
+    Used to supply df_ltf to the backtest engine so the LTF confirmation filter
+    runs identically to the live bot.
+    """
+    start = f"{year}-01-01"
+    now = datetime.now(timezone.utc)
+    end_dt = now if year >= now.year else datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+
+    # Try Delta Exchange first
+    try:
+        import requests
+        delta_sym = to_delta(SYMBOL)
+        base_url = DELTA_BASE_URL.rstrip("/")
+        start_ts = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp())
+        end_ts = int(end_dt.timestamp())
+
+        all_candles = []
+        cursor = start_ts
+        while cursor < end_ts:
+            params = {"symbol": delta_sym, "resolution": ltf_tf, "start": cursor, "end": end_ts}
+            resp = requests.get(f"{base_url}/v2/history/candles", params=params, timeout=15)
+            resp.raise_for_status()
+            batch = resp.json().get("result", [])
+            if not batch:
+                break
+            all_candles.extend(batch)
+            last_time = max(c["time"] for c in batch)
+            if last_time <= cursor:
+                break
+            cursor = last_time + 1
+            time.sleep(0.15)
+
+        if all_candles:
+            df = pd.DataFrame(all_candles)
+            df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
+            df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+            df = df.sort_values("ts").drop_duplicates("ts").set_index("ts")
+            if len(df) >= 100:
+                print(f"  {C.GREEN}{len(df)} {ltf_tf.upper()} bars from Delta{C.RESET}")
+                return df
+    except Exception as e:
+        print(f"  {C.YELLOW}[Delta LTF fetch failed: {e}]{C.RESET}")
+
+    # Fallback: Binance
+    try:
+        binance_symbol = to_binance(SYMBOL)
+        since_ms = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
+        until_ms = int(end_dt.timestamp() * 1000)
+        df_ltf = fetch_ohlcv(EXCHANGE, binance_symbol, ltf_tf, since_ms, until_ms)
+        if df_ltf is not None and len(df_ltf) >= 100:
+            print(f"  {C.GREEN}{len(df_ltf)} {ltf_tf.upper()} bars from Binance{C.RESET}")
+            return df_ltf
+    except Exception as e:
+        print(f"  {C.YELLOW}[Binance LTF fetch failed: {e}]{C.RESET}")
+
+    print(f"  {C.YELLOW}[WARN] Could not fetch LTF data — LTF filter will be disabled for {year}.{C.RESET}")
+    return None
+
+
+def cache_path(year: int, symbol: str = None, suffix: str = "") -> Path:
     symbol = (symbol or SYMBOL).replace("/", "_")
-    return CACHE_DIR / f"rider_{symbol}_{year}.json"
+    return CACHE_DIR / f"rider{suffix}_{symbol}_{year}.json"
 
 def prune_cache():
     """Evict cache files older than max age or when total size exceeds limit."""
@@ -243,34 +307,42 @@ def prune_cache():
 def year_complete(year: int) -> bool:
     return year < datetime.now(timezone.utc).year
 
-def load_cache(year: int, symbol: str = None):
-    p = cache_path(year, symbol)
+def load_cache(year: int, symbol: str = None, suffix: str = ""):
+    p = cache_path(year, symbol, suffix)
     if not p.exists() or not year_complete(year):
         return None
     with open(p, "r") as f:
         return json.load(f)
 
-def save_cache(year: int, data: dict, symbol: str = None):
+def save_cache(year: int, data: dict, symbol: str = None, suffix: str = ""):
     data["cached_at"] = datetime.now(timezone.utc).isoformat()
-    with open(cache_path(year, symbol), "w") as f:
+    with open(cache_path(year, symbol, suffix), "w") as f:
         json.dump(data, f)
 
 
 def run_year(year: int):
-    """Fetch data, run Trend Rider backtest with 0.5%->0.3% trailing stop, return result dict."""
+    """Fetch 4H + 1H data, run Trend Rider backtest with LTF filter, return result dict."""
     df4h = fetch_year_data(year)
 
     if len(df4h) < 100:
         raise ValueError(f"Insufficient data for {year}: only {len(df4h)} 4H bars")
 
-    print(f"  {C.GRAY}Running Trend Rider backtest...{C.RESET}", flush=True)
+    # Fetch LTF (1H) data for LTF confirmation filter
+    print(f"  {C.GRAY}Fetching 1H LTF data for confirmation filter...{C.RESET}", flush=True)
+    df_ltf = fetch_ltf_year_data(year, ltf_tf="1h")
+
+    print(f"  {C.GRAY}Running Trend Rider v3 backtest (+ LTF filter)...{C.RESET}", flush=True)
 
     params = TrendRiderParams(
-        trail_pct_activation=0.5, # Move 0.5% in profit -> activate trailing stop
-        trail_pct_distance=0.3,   # Trail 0.3% behind peak price
+        trail_pct_activation=0.5,   # Move 0.5% in profit -> activate trailing stop
+        trail_pct_distance=0.3,     # Trail 0.3% behind peak price
+        ltf_enabled=df_ltf is not None,   # Enable only if data available
+        ltf_confirm_mode="majority",      # 3/4 conditions must pass
     )
-    trades, eq_df = run_trend_rider_backtest(df4h, params, capital=CAPITAL)
+    trades, eq_df = run_trend_rider_backtest(df4h, params, capital=CAPITAL, df_ltf=df_ltf)
     metrics = get_metrics(trades, eq_df, CAPITAL)
+
+    ltf_status = f"1H LTF filter: {'ON' if params.ltf_enabled else 'OFF (no data)'}"
 
     eq_values = [float(row["equity"]) for _, row in eq_df.iterrows()]
 
@@ -293,6 +365,7 @@ def run_year(year: int):
         "equity_values": eq_values,
         "trades": trade_log,
         "data_bars": len(df4h),
+        "ltf_status": ltf_status,
     }
 
 
@@ -300,12 +373,15 @@ def run_year(year: int):
 # DISPLAY RESULTS
 # ============================================================================
 
-def print_summary_card(m, year, from_cache, elapsed, data_bars):
+def print_summary_card(m, year, from_cache, elapsed, data_bars, result=None):
     tag = f"{C.BLUE}[CACHED]{C.RESET}" if from_cache else f"{C.GREEN}[FRESH]{C.RESET}"
     
     print(f"\n  {C.CYAN}{C.BOLD}+{'='*64}+{C.RESET}")
     print(f"  {C.CYAN}{C.BOLD}|{C.RESET}  {C.WHITE}{C.BOLD}ANNUAL BACKTEST OVERVIEW -- YEAR {year}{C.RESET}  {tag} ({elapsed:.1f}s)  {C.CYAN}{C.BOLD}|{C.RESET}")
     print(f"  {C.CYAN}{C.BOLD}+{'='*64}+{C.RESET}")
+    ltf_s = (result or {}).get('ltf_status', '')
+    if ltf_s:
+        print(f"  {C.GRAY}{ltf_s}{C.RESET}")
     
     ret_color = C.GREEN if m['total_return_pct'] >= 15 else (C.YELLOW if m['total_return_pct'] >= 0 else C.RED)
     wr_color = C.GREEN if m['win_rate'] >= 50 else C.YELLOW
@@ -325,7 +401,7 @@ def display(result, year, from_cache, elapsed):
     print_header()
 
     # Always show top summary card
-    print_summary_card(m, year, from_cache, elapsed, result.get('data_bars', 0))
+    print_summary_card(m, year, from_cache, elapsed, result.get('data_bars', 0), result=result)
 
     # -- DETAILED PERFORMANCE TABLE --
     section("DETAILED METRICS", "#")
@@ -381,7 +457,7 @@ def display(result, year, from_cache, elapsed):
             print(f"  {C.GRAY}{i:>3}{C.RESET} {dc}{ds:>5}{C.RESET} {tc}{t['type']:<10}{C.RESET} {t['entry']:<17} {C.WHITE}${t['entry_px']:>9,.2f}{C.RESET} {t['exit']:<17} {C.WHITE}${t['exit_px']:>9,.2f}{C.RESET} {rc}{t['r']:>+6.2f}R{C.RESET} {pc}{t['pnl']:>+10,.2f}{C.RESET} {C.GRAY}{t['reason']:<12}{C.RESET}")
 
     # ALSO PRINT FINAL OVERVIEW AT THE VERY BOTTOM SO IT NEVER GETS LOST AFTER SCROLLING
-    print_summary_card(m, year, from_cache, elapsed, result.get('data_bars', 0))
+    print_summary_card(m, year, from_cache, elapsed, result.get('data_bars', 0), result=result)
 
 
 # ============================================================================

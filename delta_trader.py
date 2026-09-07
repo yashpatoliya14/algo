@@ -35,6 +35,8 @@ from trend_rider_engine import (
     TrendRiderParams,
     _calc_adaptive_sl,
     compute_indicators,
+    compute_ltf_indicators,
+    check_ltf_confirmation,
     supertrend_full,
 )
 from telegram_notifier import TelegramNotifier
@@ -307,6 +309,8 @@ class DeltaTrader:
         self.dry_run = get_env_stripped("DRY_RUN", "true").lower() == "true"
         self.poll_interval = int(get_env_stripped("POLL_INTERVAL_SEC", "60"))
 
+        self.ltf_timeframe = get_env_stripped("LTF_TIMEFRAME", "1h")
+
         self.params = TrendRiderParams(
             risk_pct=self.risk_pct,
             trail_pct_activation=float(get_env_stripped("TRAIL_PCT_ACTIVATION", "0.5")),
@@ -317,6 +321,14 @@ class DeltaTrader:
             pullback_sl_buffer=float(get_env_stripped("PULLBACK_SL_BUFFER", "0.3")),
             breakout_sl_buffer=float(get_env_stripped("BREAKOUT_SL_BUFFER", "0.5")),
             trend_sl_buffer=float(get_env_stripped("TREND_SL_BUFFER", "0.3")),
+            # LTF confirmation filter parameters
+            ltf_enabled=get_env_stripped("LTF_ENABLED", "true").lower() == "true",
+            ltf_confirm_mode=get_env_stripped("LTF_CONFIRM_MODE", "majority"),
+            ltf_ema_fast=int(get_env_stripped("LTF_EMA_FAST", "9")),
+            ltf_ema_slow=int(get_env_stripped("LTF_EMA_SLOW", "21")),
+            ltf_rsi_period=int(get_env_stripped("LTF_RSI_PERIOD", "14")),
+            ltf_st_period=int(get_env_stripped("LTF_ST_PERIOD", "10")),
+            ltf_st_mult=float(get_env_stripped("LTF_ST_MULT", "2.0")),
         )
 
         self.client = DeltaClient(self.api_key, self.api_secret, self.base_url)
@@ -536,6 +548,8 @@ class DeltaTrader:
         print(f"    Pullback SL buffer:  {self.params.pullback_sl_buffer}x ATR below swing low")
         print(f"    Breakout SL buffer:  {self.params.breakout_sl_buffer}x ATR from Donchian")
         print(f"    FreshTrend SL buf:   {self.params.trend_sl_buffer}x ATR from Supertrend")
+        ltf_status = f"\033[92mON\033[0m ({self.ltf_timeframe.upper()}, mode={self.params.ltf_confirm_mode})" if self.params.ltf_enabled else "\033[93mOFF\033[0m"
+        print(f"  LTF Confirmation:      {ltf_status}")
         print(f"  API Base URL:          {self.base_url}")
         print("=" * 65)
         print()
@@ -621,6 +635,82 @@ class DeltaTrader:
 
         raise ValueError(f"No candles from Delta or Binance for {self.symbol} ({self.timeframe})")
 
+    def fetch_ltf_candles(self, limit: int = 60) -> pd.DataFrame | None:
+        """Fetch lower-timeframe (e.g. 1H) candles for LTF confirmation filter.
+
+        Uses the same Delta→Binance fallback. Returns None silently on failure
+        so the main strategy still runs without LTF data (filter is bypassed).
+        """
+        if not self.params.ltf_enabled:
+            return None
+        try:
+            now_ts = int(time.time())
+            # Compute seconds per LTF bar
+            ltf_tf = self.ltf_timeframe.strip().lower()
+            if ltf_tf.endswith("h"):
+                bar_secs = int(ltf_tf[:-1]) * 3600
+            elif ltf_tf.endswith("m"):
+                bar_secs = int(ltf_tf[:-1]) * 60
+            else:
+                bar_secs = 3600  # default 1h
+            start_ts = now_ts - (limit * bar_secs)
+
+            # Try Delta Exchange first
+            try:
+                raw = self.client.get_candles(self.symbol, self.ltf_timeframe, start_ts, now_ts)
+                if raw:
+                    df = pd.DataFrame(raw)
+                    df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
+                    df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+                    df = df.sort_values("ts").drop_duplicates("ts").set_index("ts")
+                    if len(df) >= 10:
+                        print(f"  [LTF] {self.ltf_timeframe.upper()} candles from Delta ({len(df)} bars)")
+                        return df
+            except Exception:
+                pass
+
+            # Fallback: Binance
+            try:
+                import ccxt
+                binance_symbol = to_binance(self.symbol_canonical)
+                exchange = ccxt.binance({"enableRateLimit": True})
+                batch = exchange.fetch_ohlcv(binance_symbol, timeframe=self.ltf_timeframe, since=start_ts * 1000, limit=limit)
+                if batch:
+                    df = pd.DataFrame(batch, columns=["ts", "open", "high", "low", "close", "volume"])
+                    df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+                    df = df.drop_duplicates("ts").set_index("ts")
+                    df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+                    if len(df) >= 10:
+                        print(f"  [LTF] {self.ltf_timeframe.upper()} candles from Binance ({len(df)} bars)")
+                        return df
+            except Exception:
+                pass
+
+            print(f"  [LTF] [WARN] Could not fetch {self.ltf_timeframe.upper()} candles — LTF filter bypassed.")
+            return None
+        except Exception as e:
+            print(f"  [LTF] [WARN] LTF fetch error: {e} — LTF filter bypassed.")
+            return None
+
+    def _check_ltf_confirmation(self, direction: str, df_ltf: pd.DataFrame) -> tuple[bool, str]:
+        """Check LTF alignment for a given trade direction.
+
+        Uses the most recent closed LTF bar (iloc[-2] to avoid including the
+        currently forming candle, same convention as 4H signal evaluation).
+        Returns (confirmed, reason_string).
+        """
+        if not self.params.ltf_enabled or df_ltf is None or len(df_ltf) < 10:
+            return True, "ltf_filter_disabled"
+        try:
+            ltf_ind = compute_ltf_indicators(df_ltf, self.params)
+            ltf_ind = ltf_ind.dropna(subset=["ltf_ema_fast", "ltf_rsi", "ltf_st_dir"])
+            if len(ltf_ind) < 2:
+                return True, "ltf_insufficient_data"
+            ltf_bar = ltf_ind.iloc[-2]  # last COMPLETED LTF bar (same convention as 4H)
+            return check_ltf_confirmation(direction, ltf_bar, self.params)
+        except Exception as e:
+            return True, f"ltf_error({e})"
+
     def evaluate_signals(self, df: pd.DataFrame):
         """Evaluate Trend Rider signals on the latest completed candle."""
         d = compute_indicators(df, self.params)
@@ -696,6 +786,9 @@ class DeltaTrader:
             print(f"  [{self.symbol_canonical}] [ERROR] Failed to fetch candle data: {e}")
             print(f"  [{self.symbol_canonical}] Skipping this symbol for this cycle.")
             return
+
+        # Fetch LTF candles for confirmation filter (non-blocking — returns None on failure)
+        df_ltf = self.fetch_ltf_candles(limit=60)
 
         try:
             ticker = self.client.get_ticker(self.symbol)
@@ -823,16 +916,25 @@ class DeltaTrader:
                 if sig_key in self._notified_signals:
                     print(f"  [{self.symbol_canonical}] Signal already processed for this candle, skipping.")
                 else:
-                    # Attempt entry — only mark as processed if successful
-                    try:
-                        self._execute_entry(signal, signal_type, curr_bar, curr_price, df)
-                        # Mark signal as processed ONLY after successful execution
-                        self._notified_signals.add(sig_key)
-                        # Prune old keys to prevent memory leak (keep last 50 per symbol)
-                        if len(self._notified_signals) > 50:
-                            self._notified_signals = set(list(self._notified_signals)[-50:])
-                    except Exception as e:
-                        print(f"  [{self.symbol_canonical}] \033[91m[ENTRY FAILED]\033[0m {e} — will retry on next poll.")
+                    # --- LTF confirmation filter ---
+                    ltf_ok, ltf_reason = self._check_ltf_confirmation(signal, df_ltf)
+                    ltf_color = "\033[92m" if ltf_ok else "\033[91m"
+                    ltf_label = "PASS" if ltf_ok else "FAIL"
+                    print(f"  [{self.symbol_canonical}] [LTF {ltf_color}{ltf_label}\033[0m] {self.ltf_timeframe.upper()} filter: {ltf_reason}")
+
+                    if not ltf_ok:
+                        print(f"  [{self.symbol_canonical}] \033[93mSignal BLOCKED by LTF filter — skipping entry.\033[0m")
+                    else:
+                        # Attempt entry — only mark as processed if successful
+                        try:
+                            self._execute_entry(signal, signal_type, curr_bar, curr_price, df)
+                            # Mark signal as processed ONLY after successful execution
+                            self._notified_signals.add(sig_key)
+                            # Prune old keys to prevent memory leak (keep last 50 per symbol)
+                            if len(self._notified_signals) > 50:
+                                self._notified_signals = set(list(self._notified_signals)[-50:])
+                        except Exception as e:
+                            print(f"  [{self.symbol_canonical}] \033[91m[ENTRY FAILED]\033[0m {e} — will retry on next poll.")
 
     def _execute_entry(self, direction: str, signal_type: str, curr_bar, current_price: float, df: pd.DataFrame = None):
         """Calculate size, place market order and initial stop loss."""
@@ -898,6 +1000,7 @@ class DeltaTrader:
                 "init_risk": stop_dist,  # needed for R-multiple trailing (matches backtest)
             }
             try:
+                # Still send the detailed signal plan for reference
                 self.notifier.signal_detailed(
                     self.symbol_canonical,
                     direction,
@@ -912,11 +1015,10 @@ class DeltaTrader:
                     float(self.params.trail_pct_distance),
                     "No fixed TP; exit on trailing stop or trend reversal",
                 )
+                # Simulated trade opening message
+                self.notifier.trade_opened(self.symbol_canonical, direction, current_price, contracts, stop_price, self.leverage)
             except Exception:
-                try:
-                    self.notifier.execution(self.symbol_canonical, direction, contracts, current_price, stop_price)
-                except Exception:
-                    pass
+                pass
         else:
             try:
                 # Set leverage
@@ -931,9 +1033,23 @@ class DeltaTrader:
                     "size": contracts
                 })
 
+                # Fetch exact position details from exchange
+                exact_entry_price = current_price
+                exact_contracts = contracts
+                time.sleep(1.0)  # Wait for position to register
+                try:
+                    positions = self.client.get_positions(self.symbol)
+                    pos_info = next((p for p in positions if p.get("product_symbol", p.get("symbol", "")) == self.symbol), None)
+                    if pos_info:
+                        exact_entry_price = float(pos_info.get("entry_price", current_price))
+                        exact_contracts = int(pos_info.get("size", contracts))
+                        print(f"  [LIVE ORDER] Fetched exact position: Avg Entry=${exact_entry_price:,.2f}, Size={exact_contracts}")
+                except Exception as e:
+                    print(f"  [WARN] Failed to fetch exact position details after entry: {e}")
+
                 # Place stop loss order
                 exit_side = "sell" if direction == "long" else "buy"
-                stop_res = self.client.place_order(self.symbol, contracts, exit_side, "stop_market_order", stop_price=stop_price, reduce_only=True)
+                stop_res = self.client.place_order(self.symbol, exact_contracts, exit_side, "stop_market_order", stop_price=stop_price, reduce_only=True)
                 stop_order_id = stop_res.get('result', {}).get('id') or stop_res.get('id')
                 print(f"  [LIVE ORDER] Stop Loss Placed: {stop_order_id}")
                 
@@ -941,42 +1057,26 @@ class DeltaTrader:
                 self.record_order("stop_market_order", self.symbol, str(stop_order_id), {
                     "direction": direction,
                     "side": exit_side,
-                    "size": contracts,
+                    "size": exact_contracts,
                     "stop_price": stop_price,
                     "reduce_only": True
                 })
 
                 self.active_position = {
                     "direction": direction,
-                    "entry_price": current_price,
+                    "entry_price": exact_entry_price,
                     "stop_price": stop_price,
                     "trail_stop": stop_price,
-                    "peak_price": current_price,
-                    "size": contracts,
+                    "peak_price": exact_entry_price,
+                    "size": exact_contracts,
                     "type": signal_type,
                     "init_risk": stop_dist,  # needed for R-multiple trailing (matches backtest)
                     "stop_order_id": stop_order_id,  # track for targeted cancellation on exit
                 }
                 try:
-                    self.notifier.signal_detailed(
-                        self.symbol_canonical,
-                        direction,
-                        signal_type,
-                        current_price,
-                        current_price,
-                        contracts,
-                        stop_price,
-                        self.risk_pct,
-                        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-                        float(self.params.trail_pct_activation),
-                        float(self.params.trail_pct_distance),
-                        "No fixed TP; exit on trailing stop or trend reversal",
-                    )
+                    self.notifier.trade_opened(self.symbol_canonical, direction, exact_entry_price, exact_contracts, stop_price, self.leverage)
                 except Exception:
-                    try:
-                        self.notifier.execution(self.symbol_canonical, direction, contracts, current_price, stop_price)
-                    except Exception:
-                        pass
+                    pass
             except Exception as e:
                 print(f"  \033[91m[ORDER FAILED]\033[0m {e}")
                 raise  # Re-raise so run_trading_cycle knows the entry failed
@@ -1116,8 +1216,13 @@ class DeltaTrader:
             if stop_hit or st_reversed:
                 exit_price = pos["trail_stop"] if stop_hit else current_price
                 reason = "trail_stop" if stop_hit else "st_reversed"
-                pnl = (exit_price - entry_px) * pos["size"]
-                print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
+                
+                # Exact USD PnL Calculation
+                contract_val = self.contract_values.get(self.symbol, 0.001)
+                pnl_usd = (exit_price - entry_px) * pos["size"] * contract_val
+                pnl_inr = pnl_usd * float(os.getenv("USD_INR_RATE", "86.5"))
+                
+                print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl_usd:+,.2f} (₹{pnl_inr:+,.2f})")
                 if not self.dry_run:
                     self.cancel_algo_orders(pos)
                     exit_res = self.client.place_order(self.symbol, pos["size"], "sell", "market_order", reduce_only=True)
@@ -1132,7 +1237,7 @@ class DeltaTrader:
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 self.active_position = None
                 try:
-                    self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
+                    self.notifier.exit(self.symbol_canonical, direction, current_price, pnl_usd, pnl_inr)
                 except Exception:
                     pass
 
@@ -1179,8 +1284,13 @@ class DeltaTrader:
             if stop_hit or st_reversed:
                 exit_price = pos["trail_stop"] if stop_hit else current_price
                 reason = "trail_stop" if stop_hit else "st_reversed"
-                pnl = (entry_px - exit_price) * pos["size"]
-                print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl:+,.2f}")
+                
+                # Exact USD PnL Calculation
+                contract_val = self.contract_values.get(self.symbol, 0.001)
+                pnl_usd = (entry_px - exit_price) * pos["size"] * contract_val
+                pnl_inr = pnl_usd * float(os.getenv("USD_INR_RATE", "86.5"))
+                
+                print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ${current_price:,.2f} | Exit: ${exit_price:,.2f} | PnL: ${pnl_usd:+,.2f} (₹{pnl_inr:+,.2f})")
                 if not self.dry_run:
                     self.cancel_algo_orders(pos)
                     exit_res = self.client.place_order(self.symbol, pos["size"], "buy", "market_order", reduce_only=True)
@@ -1195,7 +1305,7 @@ class DeltaTrader:
                 self._last_exit_candle_ts[self.symbol] = self._get_candle_ts(curr_bar)
                 self.active_position = None
                 try:
-                    self.notifier.exit(self.symbol_canonical, direction, current_price, pnl)
+                    self.notifier.exit(self.symbol_canonical, direction, current_price, pnl_usd, pnl_inr)
                 except Exception:
                     pass
 

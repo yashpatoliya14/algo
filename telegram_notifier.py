@@ -61,22 +61,32 @@ class TelegramNotifier:
         txt = f"Signal\nSymbol: {symbol}\nDirection: {direction.upper()}\nType: {signal_type}\nPrice: {price:.2f}"
         self.send(txt)
 
-    def execution(self, symbol: str, direction: str, size: int, entry_price: float, stop_price: float):
+    def exit(self, symbol: str, direction: str, exit_price: float, pnl_usd: float, pnl_inr: float = 0.0):
+        if not self.on_exit:
+            return
+        emoji = "🟢" if pnl_usd > 0 else "🔴"
+        txt = (
+            f"{emoji} <b>TRADE CLOSED</b>\n"
+            f"<b>Symbol:</b> {symbol}\n"
+            f"<b>Direction:</b> {direction.upper()}\n"
+            f"<b>Exit Price:</b> ${exit_price:,.2f}\n"
+            f"<b>Final PnL:</b> ${pnl_usd:+,.2f}  (₹{pnl_inr:+,.2f})"
+        )
+        self.send(txt, parse_mode="HTML")
+
+    def trade_opened(self, symbol: str, direction: str, entry_price: float, size: int, stop_price: float, leverage: int):
         if not self.on_exec:
             return
         txt = (
-            f"Execution\nSymbol: {symbol}\nDirection: {direction.upper()}\nSize: {size}\n"
-            f"Entry: {entry_price:.2f}\nStop: {stop_price:.2f}"
+            f"🚀 <b>TRADE OPENED (EXACT)</b>\n"
+            f"<b>Symbol:</b> {symbol}\n"
+            f"<b>Direction:</b> {direction.upper()}\n"
+            f"<b>Avg Entry Price:</b> ${entry_price:,.2f}\n"
+            f"<b>Contracts:</b> {size}\n"
+            f"<b>Stop Loss:</b> ${stop_price:,.2f}\n"
+            f"<b>Leverage:</b> {leverage}x"
         )
-        self.send(txt)
-
-    def exit(self, symbol: str, direction: str, exit_price: float, pnl: float):
-        if not self.on_exit:
-            return
-        txt = (
-            f"Exit\nSymbol: {symbol}\nDirection: {direction.upper()}\nExit Price: {exit_price:.2f}\nPnL: {pnl:+.2f}"
-        )
-        self.send(txt)
+        self.send(txt, parse_mode="HTML")
 
     def started(self, symbols: list[str], timeframe: str, dry_run: bool, risk_pct: float, leverage: int):
         """Send a start/confirmation message with runtime settings."""
