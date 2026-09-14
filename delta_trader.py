@@ -862,10 +862,37 @@ class DeltaTrader:
                 # Cancel only the algo's stop-loss order — not all user orders
                 self.cancel_algo_orders(self.active_position)
                 print(f"  [{self.symbol_canonical}] [STATE] Cancelled algo stop-loss order for {self.symbol}.")
+                
+                # Check if it was likely a Stop Loss hit
+                direction = self.active_position["direction"]
+                trail_stop = self.active_position["trail_stop"]
+                entry_px = self.active_position["entry_price"]
+                size = self.active_position["size"]
+                
+                stop_hit = False
+                if direction == "long" and curr_bar["low"] <= trail_stop:
+                    stop_hit = True
+                elif direction == "short" and curr_bar["high"] >= trail_stop:
+                    stop_hit = True
+
+                exit_price = trail_stop if stop_hit else curr_price
+                reason = "Stop Loss Hit (Exchange)" if stop_hit else "Manual/External Exit"
+                
+                # Calculate PnL
+                contract_val = self.contract_values.get(self.symbol, 0.001)
+                if direction == "long":
+                    pnl_usd = (exit_price - entry_px) * size * contract_val
+                else:
+                    pnl_usd = (entry_px - exit_price) * size * contract_val
+                pnl_inr = pnl_usd * float(os.getenv("USD_INR_RATE", "86.5"))
+                
+                print(f"  \033[91m[POSITION CLOSED]\033[0m {reason} at ~${exit_price:,.2f} | PnL: ${pnl_usd:+,.2f} (₹{pnl_inr:+,.2f})")
+                
                 try:
-                    self.notifier.send(f"⚠️ Manual Exit Detected\nSymbol: {self.symbol_canonical}\nPosition was closed externally on the exchange.")
+                    self.notifier.exit(self.symbol_canonical, direction, exit_price, pnl_usd, pnl_inr)
                 except Exception as e:
-                    print(f"  [{self.symbol_canonical}] [WARN] Failed to send manual exit notification: {e}")
+                    print(f"  [{self.symbol_canonical}] [WARN] Failed to send exit notification: {e}")
+                
                 self.active_position = None
             else:
                 if not self.dry_run:
@@ -1017,8 +1044,10 @@ class DeltaTrader:
                 )
                 # Simulated trade opening message
                 self.notifier.trade_opened(self.symbol_canonical, direction, current_price, contracts, stop_price, self.leverage)
-            except Exception:
-                pass
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"  [WARN] Failed to send simulated trade opened notification: {e}")
         else:
             try:
                 # Set leverage
@@ -1075,8 +1104,10 @@ class DeltaTrader:
                 }
                 try:
                     self.notifier.trade_opened(self.symbol_canonical, direction, exact_entry_price, exact_contracts, stop_price, self.leverage)
-                except Exception:
-                    pass
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"  [WARN] Failed to send trade opened notification: {e}")
             except Exception as e:
                 print(f"  \033[91m[ORDER FAILED]\033[0m {e}")
                 raise  # Re-raise so run_trading_cycle knows the entry failed

@@ -33,9 +33,9 @@ class TelegramNotifier:
     def __init__(self, chat_id: Optional[str] = None):
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
         self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.on_signal = os.getenv("TELEGRAM_ON_SIGNAL", "true").lower() == "true"
-        self.on_exec = os.getenv("TELEGRAM_ON_EXECUTION", "true").lower() == "true"
-        self.on_exit = os.getenv("TELEGRAM_ON_EXIT", "true").lower() == "true"
+        self.on_signal = os.getenv("TELEGRAM_ON_SIGNAL", "true").strip("\"'").lower() == "true"
+        self.on_exec = os.getenv("TELEGRAM_ON_EXECUTION", "true").strip("\"'").lower() == "true"
+        self.on_exit = os.getenv("TELEGRAM_ON_EXIT", "true").strip("\"'").lower() == "true"
 
     def send(self, text: str, parse_mode: Optional[str] = None, reply_markup: dict = None):
         if not self.chat_id or not self.token:
