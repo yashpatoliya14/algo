@@ -5,7 +5,7 @@ The correct approach is to use a **process manager** so your bot keeps running:
 * ✅ 24/7
 * ✅ After you disconnect SSH
 * ✅ After the VM reboots
-* ✅ If the bot crashes
+* ✅ If the bot crashes 
 
 For a Python bot, I recommend **systemd** (built into Ubuntu). PM2 also works, but systemd is the standard choice for Python.
 
