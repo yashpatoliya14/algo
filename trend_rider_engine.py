@@ -310,44 +310,7 @@ def run_trend_rider_backtest(
             direction = open_trade.direction
             atr_val = row["atr"]
 
-            if direction == "long":
-                open_trade.highest_since = max(open_trade.highest_since or row["high"], row["high"])
-                r_now = (row["close"] - open_trade.entry_price) / open_trade.init_risk
-
-                # Percentage trailing stop: 1% move triggers 0.4% trailing stop
-                pct_move = (open_trade.highest_since - open_trade.entry_price) / open_trade.entry_price * 100.0
-                if pct_move >= p.trail_pct_activation:
-                    pct_stop = open_trade.highest_since * (1.0 - p.trail_pct_distance / 100.0)
-                    open_trade.trail = max(open_trade.trail, pct_stop)
-            else:
-                open_trade.lowest_since = min(open_trade.lowest_since or row["low"], row["low"])
-                r_now = (open_trade.entry_price - row["close"]) / open_trade.init_risk
-
-                # Percentage trailing stop for short: 1% move triggers 0.4% trailing stop
-                pct_move = (open_trade.entry_price - open_trade.lowest_since) / open_trade.entry_price * 100.0
-                if pct_move >= p.trail_pct_activation:
-                    pct_stop = open_trade.lowest_since * (1.0 + p.trail_pct_distance / 100.0)
-                    open_trade.trail = min(open_trade.trail, pct_stop)
-
-            # Trailing stop update
-            if r_now >= 1.0 and r_now < 2.0:
-                be = open_trade.entry_price + (p.trail_be_buffer * atr_val if direction == "long" else -p.trail_be_buffer * atr_val)
-                open_trade.trail = max(open_trade.trail, be) if direction == "long" else min(open_trade.trail, be)
-            elif r_now >= 2.0 and r_now < 4.0:
-                chand = open_trade.highest_since - p.trail_phase2_mult * atr_val if direction == "long" else open_trade.lowest_since + p.trail_phase2_mult * atr_val
-                open_trade.trail = max(open_trade.trail, chand) if direction == "long" else min(open_trade.trail, chand)
-            elif r_now >= 4.0:
-                chand = open_trade.highest_since - p.trail_phase3_mult * atr_val if direction == "long" else open_trade.lowest_since + p.trail_phase3_mult * atr_val
-                open_trade.trail = max(open_trade.trail, chand) if direction == "long" else min(open_trade.trail, chand)
-
-            # Supertrend level as floor/ceiling
-            st_val = row["st_val"]
-            if not pd.isna(st_val):
-                if direction == "long" and st_val > open_trade.trail:
-                    open_trade.trail = st_val
-                elif direction == "short" and st_val < open_trade.trail:
-                    open_trade.trail = st_val
-
+            # --- A. Check if the EXISTING stop from prev bar is hit ---
             stop_hit = (row["low"] <= open_trade.trail) if direction == "long" else (row["high"] >= open_trade.trail)
             st_reversed = (row["st_dir"] == -1) if direction == "long" else (row["st_dir"] == 1)
 
@@ -364,6 +327,60 @@ def run_trend_rider_backtest(
                 trades.append(open_trade)
                 open_trade = None
                 last_exit_bar = idx
+            else:
+                # --- B. Update trailing stop for the NEXT bar ---
+                if direction == "long":
+                    open_trade.highest_since = max(open_trade.highest_since or row["high"], row["high"])
+                    r_now = (row["close"] - open_trade.entry_price) / open_trade.init_risk
+
+                    # Percentage trailing stop: 1% move triggers 0.4% trailing stop
+                    pct_move = (open_trade.highest_since - open_trade.entry_price) / open_trade.entry_price * 100.0
+                    if pct_move >= p.trail_pct_activation:
+                        pct_stop = open_trade.highest_since * (1.0 - p.trail_pct_distance / 100.0)
+                        open_trade.trail = max(open_trade.trail, pct_stop)
+
+                    # Trailing stop update
+                    if r_now >= 1.0 and r_now < 2.0:
+                        be = open_trade.entry_price + p.trail_be_buffer * atr_val
+                        open_trade.trail = max(open_trade.trail, be)
+                    elif r_now >= 2.0 and r_now < 4.0:
+                        chand = open_trade.highest_since - p.trail_phase2_mult * atr_val
+                        open_trade.trail = max(open_trade.trail, chand)
+                    elif r_now >= 4.0:
+                        chand = open_trade.highest_since - p.trail_phase3_mult * atr_val
+                        open_trade.trail = max(open_trade.trail, chand)
+
+                    # Supertrend level as floor
+                    st_val = row["st_val"]
+                    if not pd.isna(st_val):
+                        if st_val > open_trade.trail:
+                            open_trade.trail = st_val
+                else:
+                    open_trade.lowest_since = min(open_trade.lowest_since or row["low"], row["low"])
+                    r_now = (open_trade.entry_price - row["close"]) / open_trade.init_risk
+
+                    # Percentage trailing stop for short: 1% move triggers 0.4% trailing stop
+                    pct_move = (open_trade.entry_price - open_trade.lowest_since) / open_trade.entry_price * 100.0
+                    if pct_move >= p.trail_pct_activation:
+                        pct_stop = open_trade.lowest_since * (1.0 + p.trail_pct_distance / 100.0)
+                        open_trade.trail = min(open_trade.trail, pct_stop)
+
+                    # Trailing stop update
+                    if r_now >= 1.0 and r_now < 2.0:
+                        be = open_trade.entry_price - p.trail_be_buffer * atr_val
+                        open_trade.trail = min(open_trade.trail, be)
+                    elif r_now >= 2.0 and r_now < 4.0:
+                        chand = open_trade.lowest_since + p.trail_phase2_mult * atr_val
+                        open_trade.trail = min(open_trade.trail, chand)
+                    elif r_now >= 4.0:
+                        chand = open_trade.lowest_since + p.trail_phase3_mult * atr_val
+                        open_trade.trail = min(open_trade.trail, chand)
+
+                    # Supertrend level as ceiling
+                    st_val = row["st_val"]
+                    if not pd.isna(st_val):
+                        if st_val < open_trade.trail:
+                            open_trade.trail = st_val
 
         # 2) Entry signal check (if flat and cooldown passed)
         if open_trade is None and (idx - last_exit_bar) >= p.cooldown_bars:
