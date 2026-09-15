@@ -316,7 +316,9 @@ def load_cache(year: int, symbol: str = None, suffix: str = ""):
 
 def save_cache(year: int, data: dict, symbol: str = None, suffix: str = ""):
     data["cached_at"] = datetime.now(timezone.utc).isoformat()
-    with open(cache_path(year, symbol, suffix), "w") as f:
+    p = cache_path(year, symbol, suffix)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as f:
         json.dump(data, f)
 
 
