@@ -13,8 +13,12 @@ def _post(method: str, data: dict) -> dict:
     url = API_URL.format(token=token, method=method)
     try:
         r = requests.post(url, json=data, timeout=10)
-        return r.json()
-    except Exception:
+        res = r.json()
+        if not res.get("ok"):
+            print(f"[Telegram API Error] {res.get('description')}")
+        return res
+    except Exception as e:
+        print(f"[Telegram Request Error] {e}")
         return {}
 
 def _get(method: str, params: dict = None) -> dict:

@@ -316,7 +316,7 @@ class DeltaTrader:
             trail_pct_activation=float(get_env_stripped("TRAIL_PCT_ACTIVATION", "0.5")),
             trail_pct_distance=float(get_env_stripped("TRAIL_PCT_DISTANCE", "0.3")),
             # Adaptive SL parameters
-            max_sl_pct=float(get_env_stripped("MAX_SL_PCT", "1.5")),
+            sl_cap_max_pct=float(get_env_stripped("MAX_SL_PCT", "1.5")),
             min_sl_atr_mult=float(get_env_stripped("MIN_SL_ATR_MULT", "0.5")),
             pullback_sl_buffer=float(get_env_stripped("PULLBACK_SL_BUFFER", "0.3")),
             breakout_sl_buffer=float(get_env_stripped("BREAKOUT_SL_BUFFER", "0.5")),
@@ -543,7 +543,7 @@ class DeltaTrader:
         print(f"  Leverage:              {self.leverage}x")
         print(f"  Trailing Trigger:      {self.params.trail_pct_activation}% move -> {self.params.trail_pct_distance}% trail")
         print(f"  Stop Loss Mode:        Adaptive (structure-based)")
-        print(f"    Max SL Cap:          {self.params.max_sl_pct}% of price")
+        print(f"    Max SL Cap:          {self.params.sl_cap_max_pct}% of price")
         print(f"    Min SL Floor:        {self.params.min_sl_atr_mult}x ATR")
         print(f"    Pullback SL buffer:  {self.params.pullback_sl_buffer}x ATR below swing low")
         print(f"    Breakout SL buffer:  {self.params.breakout_sl_buffer}x ATR from Donchian")
@@ -1014,6 +1014,27 @@ class DeltaTrader:
         print(f"  Entry Price: ${current_price:,.2f}")
         print(f"  Stop Loss:   ${stop_price:,.2f} (Dist: ${stop_dist:,.2f} / {sl_pct:.2f}%)  [signal={signal_type}]")
 
+        try:
+            # Send the detailed signal plan for reference
+            self.notifier.signal_detailed(
+                self.symbol_canonical,
+                direction,
+                signal_type,
+                current_price,
+                current_price,
+                contracts,
+                stop_price,
+                self.risk_pct,
+                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                float(self.params.trail_pct_activation),
+                float(self.params.trail_pct_distance),
+                "No fixed TP; exit on trailing stop or trend reversal",
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"  [WARN] Failed to send detailed signal notification: {e}")
+
         if self.dry_run:
             print("  \033[93m[DRY RUN] Order simulated successfully!\033[0m")
             self.active_position = {
@@ -1027,21 +1048,6 @@ class DeltaTrader:
                 "init_risk": stop_dist,  # needed for R-multiple trailing (matches backtest)
             }
             try:
-                # Still send the detailed signal plan for reference
-                self.notifier.signal_detailed(
-                    self.symbol_canonical,
-                    direction,
-                    signal_type,
-                    current_price,
-                    current_price,
-                    contracts,
-                    stop_price,
-                    self.risk_pct,
-                    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-                    float(self.params.trail_pct_activation),
-                    float(self.params.trail_pct_distance),
-                    "No fixed TP; exit on trailing stop or trend reversal",
-                )
                 # Simulated trade opening message
                 self.notifier.trade_opened(self.symbol_canonical, direction, current_price, contracts, stop_price, self.leverage)
             except Exception as e:
