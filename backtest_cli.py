@@ -471,34 +471,13 @@ def main():
     # Prune cache on startup
     prune_cache()
 
-    # Optionally allow selecting a symbol from Delta Exchange products
-    print(f"  {C.GRAY}Fetching available products from exchange...{C.RESET}")
-    try:
-        products = list_exchange_products(EXCHANGE)
-        symbols = sorted([p for p in products if "/" in p])
-    except Exception:
-        symbols = []
-
-    if symbols:
-        print(f"  {C.BOLD}Available symbols sample:{C.RESET} {', '.join(symbols[:12])} ...")
-        print(f"  Enter symbol in format 'BTC/USDT' or press Enter to use default ({SYMBOL})")
-        sinput = input(f"  {C.CYAN}>{C.RESET} Symbol: ").strip()
-        if sinput:
-            try:
-                SYMBOL_OVERRIDE = to_binance(sinput)
-            except Exception:
-                print(f"  {C.RED}Invalid symbol format: {sinput}. Using default {SYMBOL}{C.RESET}")
-                SYMBOL_OVERRIDE = SYMBOL
-        else:
-            SYMBOL_OVERRIDE = SYMBOL
-    else:
-        SYMBOL_OVERRIDE = SYMBOL
+    SYMBOL_OVERRIDE = SYMBOL
 
     current_year = datetime.now().year
     years = list(range(2018, current_year + 1))
 
     while True:
-        print(f"  {C.BOLD}{C.WHITE}Available Years:{C.RESET}")
+        print(f"  {C.BOLD}{C.WHITE}Available Years (Current Symbol: {SYMBOL_OVERRIDE}):{C.RESET}")
         print()
         line = "  "
         for y in years:
@@ -507,8 +486,24 @@ def main():
             line += f"  {mark}{C.WHITE}{y}{C.RESET}"
         print(line)
         print()
-        print(f"  {C.GRAY}{C.BLUE}*{C.RESET}{C.GRAY} = cached    Enter year or 'q' to quit{C.RESET}")
+        print(f"  {C.GRAY}{C.BLUE}*{C.RESET}{C.GRAY} = cached    Enter 'q' to quit at any prompt{C.RESET}")
         print()
+
+        try:
+            sinput = input(f"  {C.CYAN}>{C.RESET} Symbol (Enter for {SYMBOL_OVERRIDE}): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n  {C.GRAY}Goodbye!{C.RESET}\n")
+            break
+
+        if sinput.lower() in ("q", "quit", "exit"):
+            print(f"\n  {C.GRAY}Goodbye!{C.RESET}\n")
+            break
+
+        if sinput:
+            try:
+                SYMBOL_OVERRIDE = to_binance(sinput)
+            except Exception:
+                print(f"  {C.RED}Invalid symbol format: {sinput}. Using {SYMBOL_OVERRIDE}{C.RESET}")
 
         try:
             choice = input(f"  {C.CYAN}>{C.RESET} Year: ").strip()

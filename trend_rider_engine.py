@@ -108,10 +108,15 @@ class TrendRiderParams:
     trail_phase3_mult: float = 1.8
     trail_pct_activation: float = 0.5  # Activate trailing stop when price moves 0.5% in profit
     trail_pct_distance: float = 0.3    # Trail 0.3% behind peak price
+    scale_out_pct: float = 50.0        # Percent of position to sell at scale_out_r_target
+    scale_out_r_target: float = 1.0    # R-multiple target to trigger partial scale-out
     risk_pct: float = 1.5
     cooldown_bars: int = 3
     # ---- Adaptive, structure-based SL parameters ----
-    max_sl_pct: float = 1.5           # Hard cap: SL never wider than this % of entry price
+    sl_cap_min_pct: float = 0.8       # Dynamic SL Cap Floor
+    sl_cap_max_pct: float = 2.5       # Dynamic SL Cap Ceiling
+    ltf_swing_lookback: int = 5       # Lookback bars on LTF (e.g., 1H) for structural SL
+    max_sl_pct: float = 1.5           # Legacy hard cap (replaced by dynamic cap)
     min_sl_atr_mult: float = 0.5      # Floor: SL always at least this many ATRs wide
     pullback_sl_bars: int = 2         # Lookback bars to find swing low/high for pullback SL
     pullback_sl_buffer: float = 0.3   # ATR buffer subtracted from swing low (added to swing high for shorts)
@@ -253,6 +258,8 @@ class Trade:
     lowest_since: float = None
     trail: float = None
     equity_at_entry: float = 0.0
+    scaled_out: bool = False
+    realized_pnl: float = 0.0
 
 
 # ============================================================================
@@ -322,33 +329,48 @@ def run_trend_rider_backtest(
                 open_trade.exit_time = t
                 open_trade.exit_price = exit_price
                 open_trade.exit_reason = reason
-                open_trade.pnl = pnl
+                open_trade.pnl = pnl + open_trade.realized_pnl
                 open_trade.r_multiple = float((exit_price - open_trade.entry_price) / open_trade.init_risk if direction == "long" else (open_trade.entry_price - exit_price) / open_trade.init_risk)
                 trades.append(open_trade)
                 open_trade = None
                 last_exit_bar = idx
             else:
+                # --- Scale Out ---
+                if direction == "long":
+                    r_high = (row["high"] - open_trade.entry_price) / open_trade.init_risk
+                    if r_high >= p.scale_out_r_target and not open_trade.scaled_out:
+                        scale_out_px = open_trade.entry_price + p.scale_out_r_target * open_trade.init_risk
+                        scale_qty = open_trade.qty * (p.scale_out_pct / 100.0)
+                        realized = scale_qty * (scale_out_px - open_trade.entry_price)
+                        equity += realized
+                        open_trade.realized_pnl += realized
+                        open_trade.qty -= scale_qty
+                        open_trade.scaled_out = True
+                else:
+                    r_low = (open_trade.entry_price - row["low"]) / open_trade.init_risk
+                    if r_low >= p.scale_out_r_target and not open_trade.scaled_out:
+                        scale_out_px = open_trade.entry_price - p.scale_out_r_target * open_trade.init_risk
+                        scale_qty = open_trade.qty * (p.scale_out_pct / 100.0)
+                        realized = scale_qty * (open_trade.entry_price - scale_out_px)
+                        equity += realized
+                        open_trade.realized_pnl += realized
+                        open_trade.qty -= scale_qty
+                        open_trade.scaled_out = True
+
                 # --- B. Update trailing stop for the NEXT bar ---
                 if direction == "long":
                     open_trade.highest_since = max(open_trade.highest_since or row["high"], row["high"])
-                    r_now = (row["close"] - open_trade.entry_price) / open_trade.init_risk
+                    r_now = (open_trade.highest_since - open_trade.entry_price) / open_trade.init_risk
 
-                    # Percentage trailing stop: 1% move triggers 0.4% trailing stop
-                    pct_move = (open_trade.highest_since - open_trade.entry_price) / open_trade.entry_price * 100.0
-                    if pct_move >= p.trail_pct_activation:
-                        pct_stop = open_trade.highest_since * (1.0 - p.trail_pct_distance / 100.0)
-                        open_trade.trail = max(open_trade.trail, pct_stop)
-
-                    # Trailing stop update
-                    if r_now >= 1.0 and r_now < 2.0:
-                        be = open_trade.entry_price + p.trail_be_buffer * atr_val
-                        open_trade.trail = max(open_trade.trail, be)
-                    elif r_now >= 2.0 and r_now < 4.0:
-                        chand = open_trade.highest_since - p.trail_phase2_mult * atr_val
-                        open_trade.trail = max(open_trade.trail, chand)
-                    elif r_now >= 4.0:
-                        chand = open_trade.highest_since - p.trail_phase3_mult * atr_val
-                        open_trade.trail = max(open_trade.trail, chand)
+                    # Step-trailing based on max R reached
+                    if r_now >= 4.0:
+                        open_trade.trail = max(open_trade.trail, row["ema_fast"])
+                    elif r_now >= 3.0:
+                        open_trade.trail = max(open_trade.trail, open_trade.entry_price + 2.0 * open_trade.init_risk)
+                    elif r_now >= 2.0:
+                        open_trade.trail = max(open_trade.trail, open_trade.entry_price + 1.0 * open_trade.init_risk)
+                    elif r_now >= 1.0:
+                        open_trade.trail = max(open_trade.trail, open_trade.entry_price + p.trail_be_buffer * atr_val)
 
                     # Supertrend level as floor
                     st_val = row["st_val"]
@@ -357,24 +379,17 @@ def run_trend_rider_backtest(
                             open_trade.trail = st_val
                 else:
                     open_trade.lowest_since = min(open_trade.lowest_since or row["low"], row["low"])
-                    r_now = (open_trade.entry_price - row["close"]) / open_trade.init_risk
+                    r_now = (open_trade.entry_price - open_trade.lowest_since) / open_trade.init_risk
 
-                    # Percentage trailing stop for short: 1% move triggers 0.4% trailing stop
-                    pct_move = (open_trade.entry_price - open_trade.lowest_since) / open_trade.entry_price * 100.0
-                    if pct_move >= p.trail_pct_activation:
-                        pct_stop = open_trade.lowest_since * (1.0 + p.trail_pct_distance / 100.0)
-                        open_trade.trail = min(open_trade.trail, pct_stop)
-
-                    # Trailing stop update
-                    if r_now >= 1.0 and r_now < 2.0:
-                        be = open_trade.entry_price - p.trail_be_buffer * atr_val
-                        open_trade.trail = min(open_trade.trail, be)
-                    elif r_now >= 2.0 and r_now < 4.0:
-                        chand = open_trade.lowest_since + p.trail_phase2_mult * atr_val
-                        open_trade.trail = min(open_trade.trail, chand)
-                    elif r_now >= 4.0:
-                        chand = open_trade.lowest_since + p.trail_phase3_mult * atr_val
-                        open_trade.trail = min(open_trade.trail, chand)
+                    # Step-trailing based on max R reached
+                    if r_now >= 4.0:
+                        open_trade.trail = min(open_trade.trail, row["ema_fast"])
+                    elif r_now >= 3.0:
+                        open_trade.trail = min(open_trade.trail, open_trade.entry_price - 2.0 * open_trade.init_risk)
+                    elif r_now >= 2.0:
+                        open_trade.trail = min(open_trade.trail, open_trade.entry_price - 1.0 * open_trade.init_risk)
+                    elif r_now >= 1.0:
+                        open_trade.trail = min(open_trade.trail, open_trade.entry_price - p.trail_be_buffer * atr_val)
 
                     # Supertrend level as ceiling
                     st_val = row["st_val"]
@@ -388,6 +403,9 @@ def run_trend_rider_backtest(
             signal_type = ""
             atr_val = row["atr"]
             ema_val = row["ema_fast"]
+            current_ltf_slice = None
+            if ltf_d is not None:
+                current_ltf_slice = ltf_d[ltf_d.index <= t]
 
             if row["trend_bull"] and row["ema_fast_slope"]:
                 is_pullback = (prev_row["low"] <= ema_val * 1.003) and (row["close"] > ema_val) and (row["close"] > row["open"])
@@ -417,11 +435,9 @@ def run_trend_rider_backtest(
                 # --- LTF confirmation filter ---
                 ltf_confirmed = True
                 ltf_reason = "ltf_disabled"
-                if ltf_d is not None and p.ltf_enabled:
-                    # Get the last ltf_lookback_bars LTF rows that closed AT OR BEFORE this 4H candle's timestamp
-                    ltf_slice = ltf_d[ltf_d.index <= t]
-                    if len(ltf_slice) >= 1:
-                        ltf_bar = ltf_slice.iloc[-1]  # most recent closed LTF bar
+                if current_ltf_slice is not None and p.ltf_enabled:
+                    if len(current_ltf_slice) >= 1:
+                        ltf_bar = current_ltf_slice.iloc[-1]
                         ltf_confirmed, ltf_reason = check_ltf_confirmation(signal, ltf_bar, p)
                     else:
                         ltf_reason = "ltf_no_data(skip_filter)"
@@ -432,7 +448,7 @@ def run_trend_rider_backtest(
 
             if signal is not None:
                 entry_price = row["close"]
-                stop = _calc_adaptive_sl(signal, signal_type, entry_price, row, prev_row, p)
+                stop = _calc_adaptive_sl(signal, signal_type, entry_price, row, prev_row, current_ltf_slice, p)
                 risk_dist = abs(entry_price - stop)
                 if risk_dist > 0:
                     qty = (equity * (p.risk_pct / 100)) / risk_dist
@@ -455,7 +471,7 @@ def run_trend_rider_backtest(
         open_trade.exit_time = d.index[-1]
         open_trade.exit_price = exit_price
         open_trade.exit_reason = "end_of_data"
-        open_trade.pnl = pnl
+        open_trade.pnl = pnl + open_trade.realized_pnl
         r = (exit_price - open_trade.entry_price) / open_trade.init_risk if open_trade.direction == "long" else (open_trade.entry_price - exit_price) / open_trade.init_risk
         open_trade.r_multiple = float(r)
         trades.append(open_trade)
@@ -477,6 +493,7 @@ def _calc_adaptive_sl(
     entry_price: float,
     row,
     prev_row,
+    ltf_slice: pd.DataFrame,
     p: TrendRiderParams,
 ) -> float:
     """Calculate an adaptive, structure-based stop-loss price.
@@ -493,48 +510,51 @@ def _calc_adaptive_sl(
     """
     atr_val = row["atr"]
 
-    if signal_type == "pullback":
-        # Use the most recent swing structure: low of current + prev bar
+    if ltf_slice is not None and not ltf_slice.empty:
+        recent_ltf = ltf_slice.iloc[-p.ltf_swing_lookback:]
         if direction == "long":
-            swing = min(row["low"], prev_row["low"])
-            raw_sl = swing - p.pullback_sl_buffer * atr_val
+            swing = recent_ltf["low"].min()
+            raw_sl = swing - 0.1 * atr_val
         else:
-            swing = max(row["high"], prev_row["high"])
-            raw_sl = swing + p.pullback_sl_buffer * atr_val
-
-    elif signal_type == "breakout":
-        # SL below/above the Donchian level that was broken
-        if direction == "long":
-            donchian_ref = row.get("donchian_high", entry_price)
-            raw_sl = donchian_ref - p.breakout_sl_buffer * atr_val
-        else:
-            donchian_ref = row.get("donchian_low", entry_price)
-            raw_sl = donchian_ref + p.breakout_sl_buffer * atr_val
-
-    elif signal_type == "fresh_trend":
-        # SL at the Supertrend line (the structural invalidation point)
-        st_val = row.get("st_val", None)
-        if st_val is not None and not (isinstance(st_val, float) and np.isnan(st_val)):
+            swing = recent_ltf["high"].max()
+            raw_sl = swing + 0.1 * atr_val
+    else:
+        if signal_type == "pullback":
             if direction == "long":
-                raw_sl = st_val - p.trend_sl_buffer * atr_val
+                swing = min(row["low"], prev_row["low"])
+                raw_sl = swing - p.pullback_sl_buffer * atr_val
             else:
-                raw_sl = st_val + p.trend_sl_buffer * atr_val
+                swing = max(row["high"], prev_row["high"])
+                raw_sl = swing + p.pullback_sl_buffer * atr_val
+        elif signal_type == "breakout":
+            if direction == "long":
+                donchian_ref = row.get("donchian_high", entry_price)
+                raw_sl = donchian_ref - p.breakout_sl_buffer * atr_val
+            else:
+                donchian_ref = row.get("donchian_low", entry_price)
+                raw_sl = donchian_ref + p.breakout_sl_buffer * atr_val
+        elif signal_type == "fresh_trend":
+            st_val = row.get("st_val", None)
+            if st_val is not None and not (isinstance(st_val, float) and np.isnan(st_val)):
+                if direction == "long":
+                    raw_sl = st_val - p.trend_sl_buffer * atr_val
+                else:
+                    raw_sl = st_val + p.trend_sl_buffer * atr_val
+            else:
+                raw_sl = entry_price - 1.5 * atr_val if direction == "long" else entry_price + 1.5 * atr_val
         else:
             raw_sl = entry_price - 1.5 * atr_val if direction == "long" else entry_price + 1.5 * atr_val
 
-    else:
-        # Manual / unknown: use legacy 1.5×ATR as sensible default
-        raw_sl = entry_price - 1.5 * atr_val if direction == "long" else entry_price + 1.5 * atr_val
-
-    # Enforce minimum SL distance (floor)
     min_dist = p.min_sl_atr_mult * atr_val
     if direction == "long":
         raw_sl = min(raw_sl, entry_price - min_dist)
     else:
         raw_sl = max(raw_sl, entry_price + min_dist)
 
-    # Enforce hard cap (never wider than max_sl_pct% of price)
-    max_dist = entry_price * (p.max_sl_pct / 100.0)
+    atr_pct = (atr_val / entry_price) * 100.0
+    dynamic_cap_pct = max(p.sl_cap_min_pct, min(p.sl_cap_max_pct, atr_pct * 1.5))
+    max_dist = entry_price * (dynamic_cap_pct / 100.0)
+    
     if direction == "long":
         raw_sl = max(raw_sl, entry_price - max_dist)
     else:
