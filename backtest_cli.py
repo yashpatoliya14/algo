@@ -373,11 +373,12 @@ def run_year(year: int):
 # DISPLAY RESULTS
 # ============================================================================
 
-def print_summary_card(m, year, from_cache, elapsed, data_bars, result=None):
+def print_summary_card(m, year, from_cache, elapsed, data_bars, result=None, symbol=None):
     tag = f"{C.BLUE}[CACHED]{C.RESET}" if from_cache else f"{C.GREEN}[FRESH]{C.RESET}"
+    sym_str = f" ({symbol})" if symbol else ""
     
     print(f"\n  {C.CYAN}{C.BOLD}+{'='*64}+{C.RESET}")
-    print(f"  {C.CYAN}{C.BOLD}|{C.RESET}  {C.WHITE}{C.BOLD}ANNUAL BACKTEST OVERVIEW -- YEAR {year}{C.RESET}  {tag} ({elapsed:.1f}s)  {C.CYAN}{C.BOLD}|{C.RESET}")
+    print(f"  {C.CYAN}{C.BOLD}|{C.RESET}  {C.WHITE}{C.BOLD}ANNUAL BACKTEST OVERVIEW -- YEAR {year}{sym_str}{C.RESET}  {tag} ({elapsed:.1f}s)  {C.CYAN}{C.BOLD}|{C.RESET}")
     print(f"  {C.CYAN}{C.BOLD}+{'='*64}+{C.RESET}")
     ltf_s = (result or {}).get('ltf_status', '')
     if ltf_s:
@@ -394,14 +395,14 @@ def print_summary_card(m, year, from_cache, elapsed, data_bars, result=None):
     print(f"  {C.CYAN}{C.BOLD}+{'='*64}+{C.RESET}\n")
 
 
-def display(result, year, from_cache, elapsed):
+def display(result, year, from_cache, elapsed, symbol=None):
     m = result["metrics"]
 
     os.system("cls" if sys.platform == "win32" else "clear")
     print_header()
 
     # Always show top summary card
-    print_summary_card(m, year, from_cache, elapsed, result.get('data_bars', 0), result=result)
+    print_summary_card(m, year, from_cache, elapsed, result.get('data_bars', 0), result=result, symbol=symbol)
 
     # -- DETAILED PERFORMANCE TABLE --
     section("DETAILED METRICS", "#")
@@ -457,7 +458,7 @@ def display(result, year, from_cache, elapsed):
             print(f"  {C.GRAY}{i:>3}{C.RESET} {dc}{ds:>5}{C.RESET} {tc}{t['type']:<10}{C.RESET} {t['entry']:<17} {C.WHITE}${t['entry_px']:>9,.2f}{C.RESET} {t['exit']:<17} {C.WHITE}${t['exit_px']:>9,.2f}{C.RESET} {rc}{t['r']:>+6.2f}R{C.RESET} {pc}{t['pnl']:>+10,.2f}{C.RESET} {C.GRAY}{t['reason']:<12}{C.RESET}")
 
     # ALSO PRINT FINAL OVERVIEW AT THE VERY BOTTOM SO IT NEVER GETS LOST AFTER SCROLLING
-    print_summary_card(m, year, from_cache, elapsed, result.get('data_bars', 0), result=result)
+    print_summary_card(m, year, from_cache, elapsed, result.get('data_bars', 0), result=result, symbol=symbol)
 
 
 # ============================================================================
@@ -529,7 +530,7 @@ def main():
 
         cached_data = load_cache(year, SYMBOL_OVERRIDE)
         if cached_data is not None:
-            display(cached_data, year, True, time.time() - t0)
+            display(cached_data, year, True, time.time() - t0, symbol=SYMBOL_OVERRIDE)
         else:
             print()
             try:
@@ -540,7 +541,7 @@ def main():
                 SYMBOL = old_sym
                 elapsed = time.time() - t0
                 save_cache(year, result, SYMBOL_OVERRIDE)
-                display(result, year, False, elapsed)
+                display(result, year, False, elapsed, symbol=SYMBOL_OVERRIDE)
             except Exception as e:
                 print(f"  {C.RED}Error: {e}{C.RESET}\n")
                 continue
