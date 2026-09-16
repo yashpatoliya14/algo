@@ -1447,7 +1447,9 @@ class DeltaTrader:
                     update_id = update.get("update_id", 0)
                     if update_id > last_processed_update_id:
                         last_processed_update_id = update_id
-                        msg_text = update.get("message", {}).get("text", "").lower().strip()
+                        msg_obj = update.get("message", {})
+                        msg_text = msg_obj.get("text", "").lower().strip()
+                        chat_id = msg_obj.get("chat", {}).get("id")
                         callback_query = update.get("callback_query")
                         
                         parts = []
@@ -1469,7 +1471,15 @@ class DeltaTrader:
                         elif msg_text:
                             parts = msg_text.split()
                             
-                        if len(parts) >= 3 and parts[0] == "/sl" and parts[1].startswith("c"):
+                        if len(parts) >= 1 and parts[0] == "/start":
+                            if chat_id and self.notifier.subscribe(chat_id):
+                                url = f"https://api.telegram.org/bot{self.notifier.token}/sendMessage"
+                                requests.post(url, json={"chat_id": chat_id, "text": "✅ You are now subscribed to Yash's Trade Signals!"})
+                        elif len(parts) >= 1 and parts[0] == "/stop":
+                            if chat_id and self.notifier.unsubscribe(chat_id):
+                                url = f"https://api.telegram.org/bot{self.notifier.token}/sendMessage"
+                                requests.post(url, json={"chat_id": chat_id, "text": "❌ You have been unsubscribed."})
+                        elif len(parts) >= 3 and parts[0] == "/sl" and parts[1].startswith("c"):
                             try:
                                 idx = int(parts[1][1:]) - 1
                                 new_sl = float(parts[2])

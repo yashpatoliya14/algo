@@ -36,10 +36,53 @@ def _get(method: str, params: dict = None) -> dict:
 class TelegramNotifier:
     def __init__(self, chat_id: Optional[str] = None):
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+        env_chats = self.chat_id
+        self.chat_ids = [c.strip() for c in env_chats.split(",") if c.strip()]
+        self.subscribers_file = os.path.join(os.path.dirname(__file__), "subscribers.json")
+        self._load_subscribers()
         self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.on_signal = os.getenv("TELEGRAM_ON_SIGNAL", "true").strip("\"'").lower() == "true"
         self.on_exec = os.getenv("TELEGRAM_ON_EXECUTION", "true").strip("\"'").lower() == "true"
         self.on_exit = os.getenv("TELEGRAM_ON_EXIT", "true").strip("\"'").lower() == "true"
+
+    def _load_subscribers(self):
+        try:
+            if os.path.exists(self.subscribers_file):
+                import json
+                with open(self.subscribers_file, "r") as f:
+                    data = json.load(f)
+                    for cid in data.get("subscribers", []):
+                        cid_str = str(cid)
+                        if cid_str not in self.chat_ids:
+                            self.chat_ids.append(cid_str)
+        except Exception as e:
+            print(f"[TelegramNotifier] Error loading subscribers: {e}")
+
+    def _save_subscribers(self):
+        try:
+            import json
+            env_chats = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
+            subs_to_save = [cid for cid in self.chat_ids if cid not in env_chats]
+            with open(self.subscribers_file, "w") as f:
+                json.dump({"subscribers": subs_to_save}, f)
+        except Exception as e:
+            print(f"[TelegramNotifier] Error saving subscribers: {e}")
+
+    def subscribe(self, chat_id: str):
+        chat_id = str(chat_id)
+        if chat_id not in self.chat_ids:
+            self.chat_ids.append(chat_id)
+            self._save_subscribers()
+            return True
+        return False
+
+    def unsubscribe(self, chat_id: str):
+        chat_id = str(chat_id)
+        if chat_id in self.chat_ids:
+            self.chat_ids.remove(chat_id)
+            self._save_subscribers()
+            return True
+        return False
 
     def send(self, text: str, parse_mode: Optional[str] = None, reply_markup: dict = None):
         if not self.chat_id or not self.token:
