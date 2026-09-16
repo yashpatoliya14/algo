@@ -36,8 +36,8 @@ def _get(method: str, params: dict = None) -> dict:
 class TelegramNotifier:
     def __init__(self, chat_id: Optional[str] = None):
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
-        env_chats = self.chat_id
-        self.chat_ids = [c.strip() for c in env_chats.split(",") if c.strip()]
+        self.admin_chat_ids = [c.strip() for c in self.chat_id.split(",") if c.strip()]
+        self.chat_ids = list(self.admin_chat_ids)
         self.subscribers_file = os.path.join(os.path.dirname(__file__), "subscribers.json")
         self._load_subscribers()
         self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -84,15 +84,26 @@ class TelegramNotifier:
             return True
         return False
 
-    def send(self, text: str, parse_mode: Optional[str] = None, reply_markup: dict = None):
-        if not self.chat_id or not self.token:
+    def send(self, text: str, parse_mode: Optional[str] = None, reply_markup: dict = None, admin_only: bool = False, public_text: str = None):
+        if not self.chat_ids or not self.token:
             return None
-        payload = {"chat_id": self.chat_id, "text": text, "disable_notification": False}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        return _post("sendMessage", payload)
+        
+        results = []
+        for cid in self.chat_ids:
+            is_admin = cid in self.admin_chat_ids
+            if admin_only and not is_admin:
+                continue
+                
+            msg_text = text if is_admin else (public_text or text)
+            
+            payload = {"chat_id": cid, "text": msg_text, "disable_notification": False}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            results.append(_post("sendMessage", payload))
+            
+        return results[0] if len(results) == 1 else results
         
     def answer_callback(self, callback_query_id: str, text: str = ""):
         if not self.token:
@@ -119,7 +130,14 @@ class TelegramNotifier:
             f"<b>Exit Price:</b> ${exit_price:,.2f}\n"
             f"<b>Final PnL:</b> ${pnl_usd:+,.2f}  (₹{pnl_inr:+,.2f})"
         )
-        self.send(txt, parse_mode="HTML")
+        
+        public_txt = (
+            f"{emoji} <b>TRADE CLOSED</b>\n"
+            f"<b>Symbol:</b> {symbol}\n"
+            f"<b>Direction:</b> {direction.upper()}\n"
+            f"<b>Exit Price:</b> ${exit_price:,.2f}"
+        )
+        self.send(txt, parse_mode="HTML", public_text=public_txt)
 
     def trade_opened(self, symbol: str, direction: str, entry_price: float, size: int, stop_price: float, leverage: int):
         if not self.on_exec:
