@@ -355,11 +355,18 @@ def run_year(year: int):
             "type": t.signal_type,
             "entry": t.entry_time.strftime("%Y-%m-%d %H:%M") if t.entry_time else "-",
             "entry_px": round(t.entry_price, 2),
+            "stop": round(t.stop, 2),
+            "init_risk": round(t.init_risk, 2),
+            "qty": round(t.qty, 5),
             "exit": t.exit_time.strftime("%Y-%m-%d %H:%M") if t.exit_time else "-",
             "exit_px": round(t.exit_price, 2) if t.exit_price else 0,
             "r": round(t.r_multiple, 2) if t.r_multiple is not None else 0,
             "pnl": round(t.pnl, 2),
+            "equity_at_entry": round(t.equity_at_entry, 2),
             "reason": t.exit_reason,
+            "highest_since": round(t.highest_since, 2) if t.highest_since else None,
+            "lowest_since": round(t.lowest_since, 2) if t.lowest_since else None,
+            "trail": round(t.trail, 2) if t.trail else None,
         })
 
     return {
@@ -531,8 +538,20 @@ def main():
         t0 = time.time()
 
         cached_data = load_cache(year, SYMBOL_OVERRIDE)
+        
+        def save_csv(res, y, sym):
+            if res.get("trades"):
+                try:
+                    df_trades = pd.DataFrame(res["trades"])
+                    csv_name = f"trades_{sym.replace('/','_')}_{y}.csv"
+                    df_trades.to_csv(csv_name, index=False)
+                    print(f"  {C.GREEN}Saved full trade data to {csv_name}{C.RESET}")
+                except Exception as e:
+                    print(f"  {C.RED}Failed to save CSV: {e}{C.RESET}")
+
         if cached_data is not None:
             display(cached_data, year, True, time.time() - t0, symbol=SYMBOL_OVERRIDE)
+            save_csv(cached_data, year, SYMBOL_OVERRIDE)
         else:
             print()
             try:
@@ -544,6 +563,7 @@ def main():
                 elapsed = time.time() - t0
                 save_cache(year, result, SYMBOL_OVERRIDE)
                 display(result, year, False, elapsed, symbol=SYMBOL_OVERRIDE)
+                save_csv(result, year, SYMBOL_OVERRIDE)
             except Exception as e:
                 print(f"  {C.RED}Error: {e}{C.RESET}\n")
                 continue

@@ -3,3 +3,4 @@
 /cache
 /node_version/node_modules
 /node_version/cache 
+*.csv

@@ -3,7 +3,7 @@ from backtest_cli import fetch_ohlcv, run_trend_rider_backtest, TrendRiderParams
 from datetime import datetime, timezone
 import concurrent.futures
 
-symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "LINK/USDT", "DOT/USDT", "ADA/USDT", "XRP/USDT", "DOGE/USDT", "AVAX/USDT", "UNI/USDT", "MATIC/USDT"]
+symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "LINK/USDT", "DOT/USDT", "ADA/USDT", "XRP/USDT", "DOGE/USDT", "AVAX/USDT", "UNI/USDT", "NEAR/USDT", "SUI/USDT", "PEPE/USDT"]
 EXCHANGE = 'binance'
 year = 2026
 
