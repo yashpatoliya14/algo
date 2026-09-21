@@ -3,7 +3,7 @@ BTCUSD 4H Trend Rider — Terminal Dashboard
 ============================================
 Interactive CLI that backtests the Trend Rider strategy on BTCUSD 4H.
 Select any year, see overall winrate, annual return, metrics & trade logs instantly.
-Includes 0.5% profit trigger with 0.3% trailing stop loss.
+Uses the chandelier (2.5/1.8 ATR) + SuperTrend trailing stop.
 
 Usage:  python backtest_cli.py
 """
@@ -75,7 +75,7 @@ STRATEGY_DESC = (
     "Trend Rider v3 -- Supertrend(10,3) + EMA21/55 + 1H LTF Filter\n"
     "  Entries: Pullback-to-EMA21 | Donchian-30 Breakout | Supertrend Flip\n"
     "  LTF Filter: 1H EMA9/21 + RSI50 + Supertrend + Close (majority 3/4)\n"
-    "  Trailing Stop: 0.5% Profit Activation -> 0.3% Trailing Stop\n"
+    "  Trailing Stop: Chandelier (2.5/1.8 ATR) + SuperTrend floor\n"
     "  No partial exits -- full ride on every trend"
 )
 
@@ -114,7 +114,7 @@ def print_header():
     print()
     print(f"  {C.CYAN}{C.BOLD}+{'=' * 58}+{C.RESET}")
     print(f"  {C.CYAN}{C.BOLD}|{C.RESET}      {C.MAGENTA}{C.BOLD}BTCUSD 4H TREND RIDER{C.RESET}  {C.GRAY}-- Crypto Trend Strategy{C.RESET}    {C.CYAN}{C.BOLD}|{C.RESET}")
-    print(f"  {C.CYAN}{C.BOLD}|{C.RESET}      {C.GRAY}Pullback + Breakout + ST Flip + 0.5%->0.3% Trail{C.RESET}      {C.CYAN}{C.BOLD}|{C.RESET}")
+    print(f"  {C.CYAN}{C.BOLD}|{C.RESET}      {C.GRAY}Pullback + Breakout + ST Flip + Chandelier Trail{C.RESET}      {C.CYAN}{C.BOLD}|{C.RESET}")
     print(f"  {C.CYAN}{C.BOLD}+{'=' * 58}+{C.RESET}")
     print()
 
@@ -336,8 +336,10 @@ def run_year(year: int):
     print(f"  {C.GRAY}Running Trend Rider v3 backtest (+ LTF filter)...{C.RESET}", flush=True)
 
     params = TrendRiderParams(
-        trail_pct_activation=0.5,   # Move 0.5% in profit -> activate trailing stop
-        trail_pct_distance=0.3,     # Trail 0.3% behind peak price
+        # Percentage micro-trail disabled (999 = off). At 0.5%/0.3% it scratched
+        # winners on 4H noise and turned profitable years negative; the chandelier +
+        # SuperTrend trail is the real profit engine. See TrendRiderParams docstring.
+        trail_pct_activation=999.0,
         ltf_enabled=df_ltf is not None,   # Enable only if data available
         ltf_confirm_mode="majority",      # 3/4 conditions must pass
     )

@@ -106,8 +106,13 @@ class TrendRiderParams:
     trail_be_buffer: float = 0.2
     trail_phase2_mult: float = 2.5
     trail_phase3_mult: float = 1.8
-    trail_pct_activation: float = 0.5  # Activate trailing stop when price moves 0.5% in profit
-    trail_pct_distance: float = 0.3    # Trail 0.3% behind peak price
+    # Percentage trail is DISABLED by default (activation set impossibly high).
+    # At 0.5%/0.3% it scratched winners on 4H noise (avg winner ~1R) and turned
+    # profitable years negative. The chandelier + SuperTrend trail (below) is the
+    # strategy's real profit engine. Set trail_pct_activation to a small positive
+    # value (e.g. 0.5) only if you deliberately want the tight micro-trail back.
+    trail_pct_activation: float = 999.0  # % profit needed to activate pct trail (999 = off)
+    trail_pct_distance: float = 0.3      # Trail this % behind peak once activated
     risk_pct: float = 1.5
     cooldown_bars: int = 3
     # ---- Adaptive, structure-based SL parameters ----
@@ -316,8 +321,17 @@ def run_trend_rider_backtest(
             st_reversed = (row["st_dir"] == -1) if direction == "long" else (row["st_dir"] == 1)
 
             if stop_hit or st_reversed:
-                exit_price = open_trade.trail if stop_hit else row["close"]
-                reason = "trail_stop" if stop_hit else "st_reversed"
+                if stop_hit:
+                    # Model gap-through: if the bar opened beyond the stop, we fill
+                    # at the (worse) open price, not the stop level itself.
+                    if direction == "long":
+                        exit_price = min(open_trade.trail, row["open"])
+                    else:
+                        exit_price = max(open_trade.trail, row["open"])
+                    reason = "trail_stop"
+                else:
+                    exit_price = row["close"]
+                    reason = "st_reversed"
                 pnl = _calc_pnl(open_trade, exit_price)
                 equity += pnl
                 open_trade.exit_time = t
@@ -445,7 +459,12 @@ def run_trend_rider_backtest(
                     )
 
         prev_row = row
-        equity_curve.append((t, equity))
+        # Mark-to-market: record equity including unrealized P&L of any open trade
+        # so the equity curve (and drawdown/Sharpe/Sortino) reflect intra-trade risk.
+        mtm_equity = equity
+        if open_trade is not None:
+            mtm_equity = equity + _calc_pnl(open_trade, row["close"])
+        equity_curve.append((t, mtm_equity))
 
     # Close open position at end of data if needed
     if open_trade is not None:

@@ -1003,8 +1003,11 @@ class DeltaTrader:
             contracts = max(1, int(notional / (current_price * contract_val)))
         else:
             risk_amount = equity * (self.risk_pct / 100.0)
-            # Legacy simple logic
-            contracts = max(1, int(risk_amount / stop_dist))
+            # Risk-based sizing: number of contracts whose loss at the stop equals
+            # risk_amount. Each contract's dollar move per $1 price move is contract_val,
+            # so dollar risk per contract = stop_dist * contract_val.
+            contract_val = self.contract_values.get(self.symbol, 0.001)
+            contracts = max(1, int(risk_amount / (stop_dist * contract_val)))
 
         sl_pct = stop_dist / current_price * 100.0
         print(f"\n  \033[96m>>> EXECUTING ENTRY <<<\033[0m")
@@ -1244,6 +1247,8 @@ class DeltaTrader:
             old_trail = pos.get("_prev_trail", pos["stop_price"])
             if pos["trail_stop"] != old_trail:
                 print(f"  \033[92m[TRAILING STOP UPDATED]\033[0m R={r_now:.1f} | Peak: ${pos['peak_price']:,.2f} | Trail: ${pos['trail_stop']:,.2f}")
+                # Persist tightened trail/peak so a restart/crash doesn't revert protection.
+                self.save_state()
             pos["_prev_trail"] = pos["trail_stop"]
 
             # --- Exit checks ---
@@ -1312,6 +1317,8 @@ class DeltaTrader:
             old_trail = pos.get("_prev_trail", pos["stop_price"])
             if pos["trail_stop"] != old_trail:
                 print(f"  \033[92m[TRAILING STOP UPDATED]\033[0m R={r_now:.1f} | Peak: ${pos['peak_price']:,.2f} | Trail: ${pos['trail_stop']:,.2f}")
+                # Persist tightened trail/peak so a restart/crash doesn't revert protection.
+                self.save_state()
             pos["_prev_trail"] = pos["trail_stop"]
 
             # --- Exit checks ---
