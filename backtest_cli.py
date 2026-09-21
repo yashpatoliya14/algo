@@ -542,14 +542,7 @@ def main():
         cached_data = load_cache(year, SYMBOL_OVERRIDE)
         
         def save_csv(res, y, sym):
-            if res.get("trades"):
-                try:
-                    df_trades = pd.DataFrame(res["trades"])
-                    csv_name = f"trades_{sym.replace('/','_')}_{y}.csv"
-                    df_trades.to_csv(csv_name, index=False)
-                    print(f"  {C.GREEN}Saved full trade data to {csv_name}{C.RESET}")
-                except Exception as e:
-                    print(f"  {C.RED}Failed to save CSV: {e}{C.RESET}")
+            print(f"  {C.GRAY}No trade logs - CSV not generated.{C.RESET}")
 
         if cached_data is not None:
             display(cached_data, year, True, time.time() - t0, symbol=SYMBOL_OVERRIDE)

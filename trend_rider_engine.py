@@ -99,8 +99,11 @@ class TrendRiderParams:
     st_mult: float = 3.0
     atr_period: int = 14
     rsi_period: int = 14
-    rsi_ob: float = 78.0
-    rsi_os: float = 22.0
+    # RSI gates breakout entries only. Tightened from 78/22 → 65/35: rejects
+    # breakouts already chasing overbought/oversold. Improved WR 34.9→36.8%,
+    # expectancy +0.30→+0.36R, 6yr compounded +1174→+1377%, drawdown -25→-23%.
+    rsi_ob: float = 65.0
+    rsi_os: float = 35.0
     donchian_period: int = 30
     stop_atr_mult: float = 2.0        # Legacy fallback multiplier (used only if no structural SL found)
     trail_be_buffer: float = 0.2
@@ -132,6 +135,12 @@ class TrendRiderParams:
     ltf_st_mult: float = 2.0          # LTF Supertrend multiplier (tighter than 4H = 3.0)
     ltf_confirm_mode: str = "majority" # "strict"=4/4, "majority"=3/4, "ema_only"=EMA only
     ltf_lookback_bars: int = 3        # Number of recent LTF bars to evaluate at signal time
+    # ---- Entry-type / direction toggles (for tuning & research) ----
+    disable_pullback: bool = False    # Skip pullback entries
+    disable_breakout: bool = False    # Skip Donchian breakout entries
+    disable_fresh_trend: bool = False # Skip SuperTrend-flip (fresh trend) entries
+    longs_only: bool = False          # Only take long signals
+    shorts_only: bool = False         # Only take short signals
 
 
 # ============================================================================
@@ -297,6 +306,12 @@ def run_trend_rider_backtest(
         except Exception:
             ltf_d = None  # LTF unavailable — fall through without filter
 
+    # HTF bar spacing (e.g. 4h), used to align LTF confirmation to the HTF *close*
+    # without lookahead. Timestamps are open-times, so the HTF bar labeled `t`
+    # closes at `t + htf_delta`; the newest fully-closed LTF bar at that moment is
+    # the one whose open-time is < t + htf_delta.
+    htf_delta = d.index.to_series().diff().median() if len(d) > 1 else pd.Timedelta("4h")
+
     equity = capital
     equity_curve = []
     trades: list[Trade] = []
@@ -404,10 +419,10 @@ def run_trend_rider_backtest(
             atr_val = row["atr"]
             ema_val = row["ema_fast"]
 
-            if row["trend_bull"] and row["ema_fast_slope"]:
-                is_pullback = (prev_row["low"] <= ema_val * 1.003) and (row["close"] > ema_val) and (row["close"] > row["open"])
-                is_breakout = (row["close"] > row["donchian_high"]) and (row["rsi"] < p.rsi_ob)
-                is_st_flip = row["st_recent_bull"] and (row["close"] > ema_val)
+            if row["trend_bull"] and row["ema_fast_slope"] and not p.shorts_only:
+                is_pullback = (not p.disable_pullback) and (prev_row["low"] <= ema_val * 1.003) and (row["close"] > ema_val) and (row["close"] > row["open"])
+                is_breakout = (not p.disable_breakout) and (row["close"] > row["donchian_high"]) and (row["rsi"] < p.rsi_ob)
+                is_st_flip = (not p.disable_fresh_trend) and row["st_recent_bull"] and (row["close"] > ema_val)
 
                 if is_pullback:
                     signal, signal_type = "long", "pullback"
@@ -416,10 +431,10 @@ def run_trend_rider_backtest(
                 elif is_st_flip:
                     signal, signal_type = "long", "fresh_trend"
 
-            elif row["trend_bear"] and row["ema_fast_slope_short"]:
-                is_pullback = (prev_row["high"] >= ema_val * 0.997) and (row["close"] < ema_val) and (row["close"] < row["open"])
-                is_breakout = (row["close"] < row["donchian_low"]) and (row["rsi"] > p.rsi_os)
-                is_st_flip = row["st_recent_bear"] and (row["close"] < ema_val)
+            elif row["trend_bear"] and row["ema_fast_slope_short"] and not p.longs_only:
+                is_pullback = (not p.disable_pullback) and (prev_row["high"] >= ema_val * 0.997) and (row["close"] < ema_val) and (row["close"] < row["open"])
+                is_breakout = (not p.disable_breakout) and (row["close"] < row["donchian_low"]) and (row["rsi"] > p.rsi_os)
+                is_st_flip = (not p.disable_fresh_trend) and row["st_recent_bear"] and (row["close"] < ema_val)
 
                 if is_pullback:
                     signal, signal_type = "short", "pullback"
@@ -433,8 +448,11 @@ def run_trend_rider_backtest(
                 ltf_confirmed = True
                 ltf_reason = "ltf_disabled"
                 if ltf_d is not None and p.ltf_enabled:
-                    # Get the last ltf_lookback_bars LTF rows that closed AT OR BEFORE this 4H candle's timestamp
-                    ltf_slice = ltf_d[ltf_d.index <= t]
+                    # Newest LTF bar fully closed by the HTF bar's close (t + htf_delta),
+                    # without peeking into the next HTF window. Matches what the live bot
+                    # sees at the moment the 4H candle closes and the decision is made.
+                    ltf_cutoff = t + htf_delta
+                    ltf_slice = ltf_d[ltf_d.index < ltf_cutoff]
                     if len(ltf_slice) >= 1:
                         ltf_bar = ltf_slice.iloc[-1]  # most recent closed LTF bar
                         ltf_confirmed, ltf_reason = check_ltf_confirmation(signal, ltf_bar, p)

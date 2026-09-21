@@ -423,6 +423,35 @@ class DeltaTrader:
         except Exception as e:
             print(f"  [WARN] Failed to record order to file: {e}")
 
+    def _reconstruct_recovered_position(self, delta_sym: str, direction: str,
+                                        entry_px: float, size: float) -> dict:
+        """Build a position dict for a recovered/mismatched exchange position AND
+        place a protective stop on the exchange (M7).
+
+        Previously recovered positions ran with no exchange stop at all. We place
+        a conservative ATR-free % stop (5% from entry) so the position is never
+        left unprotected; the trailing engine tightens it from there.
+        """
+        stop_price = entry_px * 0.95 if direction == "long" else entry_px * 1.05
+        pos = {
+            "direction": direction,
+            "entry_price": entry_px,
+            "stop_price": stop_price,
+            "trail_stop": stop_price,
+            "peak_price": entry_px,
+            "size": size,
+            "type": "recovered",
+            "init_risk": abs(entry_px - stop_price),  # matches stop distance so R-phases work
+        }
+        # Place the protective stop on the exchange for THIS symbol.
+        prev_symbol = self.symbol
+        try:
+            self.symbol = delta_sym
+            self._place_stop_order(pos, stop_price)
+        finally:
+            self.symbol = prev_symbol
+        return pos
+
     def reconcile_positions(self):
         """Reconcile local state with open positions on Delta Exchange."""
         if self.dry_run:
@@ -463,30 +492,18 @@ class DeltaTrader:
                         
                         if local_direction != exchange_direction or abs(local_size - abs(exchange_size)) > 0.0001:
                             print(f"  [{canon_sym}] [WARN] Local position mismatch (Local: {local_direction} {local_size}, Exchange: {exchange_direction} {abs(exchange_size)}). Reconstructing state...")
-                            self.positions[canon_sym] = {
-                                "direction": exchange_direction,
-                                "entry_price": exchange_entry_px,
-                                "stop_price": exchange_entry_px * 0.95 if exchange_direction == "long" else exchange_entry_px * 1.05,
-                                "trail_stop": exchange_entry_px * 0.95 if exchange_direction == "long" else exchange_entry_px * 1.05,
-                                "peak_price": exchange_entry_px,
-                                "size": abs(exchange_size),
-                                "type": "recovered",
-                                "init_risk": exchange_entry_px * 0.05
-                            }
+                            recovered = self._reconstruct_recovered_position(
+                                delta_sym, exchange_direction, exchange_entry_px, abs(exchange_size)
+                            )
+                            self.positions[canon_sym] = recovered
                             state_changed = True
                     else:
                         # Position exists on exchange but no local state. Reconstruct!
                         print(f"  [{canon_sym}] [WARN] Active position of {abs(exchange_size)} found on exchange but not in local state. Reconstructing...")
-                        self.positions[canon_sym] = {
-                            "direction": exchange_direction,
-                            "entry_price": exchange_entry_px,
-                            "stop_price": exchange_entry_px * 0.95 if exchange_direction == "long" else exchange_entry_px * 1.05,
-                            "trail_stop": exchange_entry_px * 0.95 if exchange_direction == "long" else exchange_entry_px * 1.05,
-                            "peak_price": exchange_entry_px,
-                            "size": abs(exchange_size),
-                            "type": "recovered",
-                            "init_risk": exchange_entry_px * 0.05
-                        }
+                        recovered = self._reconstruct_recovered_position(
+                            delta_sym, exchange_direction, exchange_entry_px, abs(exchange_size)
+                        )
+                        self.positions[canon_sym] = recovered
                         state_changed = True
                 else:
                     # No position on exchange
@@ -1179,6 +1196,53 @@ class DeltaTrader:
         if not cancelled:
             print(f"  [ORDER] Could not cancel stop_order_id #{stop_order_id}. Skipping cancel_all_orders to avoid closing user limit orders.")
 
+    def _place_stop_order(self, pos: dict, stop_price: float):
+        """Place a reduce-only stop-market order on the exchange for `pos` and
+        record its id into pos['stop_order_id']. Returns the order id or None.
+
+        Reused by entry, recovery (M7) and trail re-issue (M6). No-op in dry_run.
+        """
+        if self.dry_run or not pos:
+            return None
+        direction = pos.get("direction")
+        exit_side = "sell" if direction == "long" else "buy"
+        size = pos.get("size")
+        try:
+            stop_res = self.client.place_order(
+                self.symbol, size, exit_side, "stop_market_order",
+                stop_price=stop_price, reduce_only=True,
+            )
+            stop_order_id = stop_res.get('result', {}).get('id') or stop_res.get('id')
+            pos["stop_order_id"] = stop_order_id
+            self.record_order("stop_market_order", self.symbol, str(stop_order_id), {
+                "direction": direction,
+                "side": exit_side,
+                "size": size,
+                "stop_price": stop_price,
+                "reduce_only": True,
+            })
+            print(f"  [LIVE ORDER] Stop order placed #{stop_order_id} @ ${stop_price:,.2f}")
+            return stop_order_id
+        except Exception as e:
+            print(f"  \033[91m[WARN] Failed to place stop order @ ${stop_price:,.2f}: {e}\033[0m")
+            return None
+
+    def _reissue_stop_order(self, pos: dict, new_stop_price: float):
+        """Cancel the existing exchange stop and place a fresh one at the new trail
+        level, so on-exchange protection tracks the in-memory trail (M6).
+        Only fires live; keeps the algo stop and the soft trail in sync.
+        """
+        if self.dry_run or not pos:
+            return
+        # Cancel the currently tracked stop (surgical; won't touch user orders).
+        old_id = pos.get("stop_order_id")
+        if old_id:
+            try:
+                self.client.cancel_order_by_id(old_id, symbol=self.symbol)
+            except Exception as e:
+                print(f"  [WARN] Could not cancel old stop #{old_id} before re-issue: {e}")
+        self._place_stop_order(pos, new_stop_price)
+
     def _get_candle_ts(self, curr_bar) -> int:
         """Extract integer timestamp from a candle bar (used for cooldown tracking)."""
         candle_time = getattr(curr_bar, "name", None)
@@ -1247,6 +1311,9 @@ class DeltaTrader:
             old_trail = pos.get("_prev_trail", pos["stop_price"])
             if pos["trail_stop"] != old_trail:
                 print(f"  \033[92m[TRAILING STOP UPDATED]\033[0m R={r_now:.1f} | Peak: ${pos['peak_price']:,.2f} | Trail: ${pos['trail_stop']:,.2f}")
+                # Move the on-exchange stop up to the new trail so protection holds
+                # even if the bot disconnects (M6).
+                self._reissue_stop_order(pos, pos["trail_stop"])
                 # Persist tightened trail/peak so a restart/crash doesn't revert protection.
                 self.save_state()
             pos["_prev_trail"] = pos["trail_stop"]
@@ -1317,6 +1384,9 @@ class DeltaTrader:
             old_trail = pos.get("_prev_trail", pos["stop_price"])
             if pos["trail_stop"] != old_trail:
                 print(f"  \033[92m[TRAILING STOP UPDATED]\033[0m R={r_now:.1f} | Peak: ${pos['peak_price']:,.2f} | Trail: ${pos['trail_stop']:,.2f}")
+                # Move the on-exchange stop down to the new trail so protection holds
+                # even if the bot disconnects (M6).
+                self._reissue_stop_order(pos, pos["trail_stop"])
                 # Persist tightened trail/peak so a restart/crash doesn't revert protection.
                 self.save_state()
             pos["_prev_trail"] = pos["trail_stop"]
