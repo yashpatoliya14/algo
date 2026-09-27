@@ -1,76 +1,103 @@
-# 🏛️ Architecture Documentation: 4H Crypto Trend Rider
+# Architecture — Gold Hedge-Grid (XAUTUSD + PAXGUSD)
 
 ## Simple explanation (plain language)
 
-This project is a 4-hour trend-following trading system for Bitcoin. It watches 4-hour candles, decides whether the market is in an uptrend or downtrend, and looks for simple entry signals (a pullback to a moving average, a breakout, or a trend flip). When a signal appears, it sizes the trade using a risk-per-trade rule and manages exits with ATR-based stops and a small percentage trailing stop.
+This is a two-leg gold strategy for Delta Exchange. A **SuperTrend(10, 3)** indicator on
+**XAUTUSD 4H** candles is the only thing that decides direction: when it flips bullish the
+bot goes long gold, when it flips bearish it goes short. On top of that main position it
+runs a **hedge grid** on the correlated **PAXGUSD**: every 1% the trade moves in its favour
+it opens one counter-lot (up to 5), and each 1% pullback buys the top lot back for a small
+profit. The main position rides the trend behind a trailing SuperTrend stop and takes profit
+at ±10%; a flip against the position, or the take-profit, flattens everything.
 
-In short: detect trend → wait for clean signal in that trend → enter with controlled risk → trail stop to protect profits.
+In short: SuperTrend flip picks the side → ride it behind a trailing stop → scalp the
+retracements with a counter-hedge grid on PAXG → flatten on the opposite flip or ±10%.
 
 ---
 
-## Architecture (components)
+## Components
 
-- **Strategy engine**: `trend_rider_engine.py` — computes indicators (EMA21/55, ATR, Supertrend, Donchian), generates signals, and updates stop/trail logic.
-- **Backtest & indicator helpers**: `crypto_trend_backtest.py` — data helpers and indicator math used for testing.
-- **CLI backtester**: `backtest_cli.py` — run historical simulations and view performance summaries.
-- **Live trader**: `delta_trader.py` — connects to Delta Exchange, reads signals, and places orders.
-- **Tests**: `test_delta_order.py` — unit tests for order logic.
-- **Cache**: `cache/` — stores downloaded or computed datasets for faster backtests (e.g., `rider_2022.json`).
+- **Strategy engine**: `gold_hedge_engine.py` — SuperTrend/ATR indicators, the
+  `GoldHedgeStrategy` decision core (`step()`), the backtest driver (`run_backtest`), and
+  performance `get_metrics`.
+- **Backtester**: `gold_hedge_backtest.py` — fetches XAUT (Delta) + PAXG (Delta, Binance
+  fallback), replays history through the engine, and writes `gold_hedge_backtest_results.md`.
+- **Live trader**: `delta_trader.py` — `DeltaClient` (signed REST wrapper) plus
+  `GoldHedgeTrader`, which polls prices, calls the same `GoldHedgeStrategy.step()`, and
+  translates the returned actions into Delta orders.
+- **Notifications / control**: `telegram_notifier.py` — startup/execution/exit messages and
+  remote commands.
+- **State & logs**: `trader_state.json` (persisted position + grid), `cache/orders.log`
+  (real-order audit trail, rotates at 1 MB).
+
+### Shared decision core
+
+The single most important design point: **backtest and live share one code path.**
+`GoldHedgeStrategy.step(xaut_price, pax_price, st_dir, flip_bull, flip_bear)` returns a list
+of `Action`s (`open_main`, `close_main`, `open_hedge`, `close_hedge`). The backtest calls it
+on each 4H close; the live trader calls it on each poll's mark price. Because the logic lives
+in one place, the two can only ever differ in *how often* they sample price, never in *what*
+they decide.
 
 Diagram (logical):
 
 ```
-Market Data (4H) --> Backtest / Live Adapter --> Trend Engine --> Risk & Order Manager --> Exchange
+Price (XAUT 4H + PAXG) --> GoldHedgeStrategy.step() --> [Actions] --> Backtest ledger OR Delta orders
 ```
 
 ---
 
 ## How the algorithm decides (step-by-step)
 
-1. Compute short and long EMAs (21 & 55), Supertrend, ATR, and Donchian channels on 4H candles.
-2. Determine regime:
-   - Bullish if EMA21 > EMA55, Supertrend is bullish, and EMA21 slope is upward.
-   - Bearish if EMA21 < EMA55, Supertrend is bearish, and EMA21 slope is downward.
-3. Generate entry signals only when signal matches the current regime:
-   - Pullback to EMA21 and a confirming candle in trend direction.
-   - Breakout above/below Donchian channel when aligned with regime.
-   - Supertrend flip that confirms EMA alignment.
-4. Calculate position size with a fixed risk percent of account equity and the distance from entry to stop.
-5. Place entry + initial stop (stop = entry ± 2 × ATR). When price moves a small profit amount, enable a tight trailing stop (e.g., 0.4% behind peak).
+1. Compute SuperTrend(10, 3) on XAUTUSD 4H; derive `st_dir` and bull/bear flip flags.
+2. **When flat:** a bull flip opens LONG `MAIN_LOTS`; a bear flip opens SHORT.
+3. **While in a position:**
+   - Take-profit: exit everything at ±`TP_PCT`% from entry.
+   - Trailing stop: exit everything when SuperTrend flips against the position.
+   - Grid add: each `STEP_PCT`% travelled in-trend opens one hedge lot on PAXG (opposite
+     side), up to `HEDGE_MAX_LOTS`.
+   - Grid close: a `STEP_PCT`% retrace back through the top lot's level closes that lot in
+     profit; travelling out again re-adds it.
+4. On a flip against the position the same `step()` call closes the old side and reverses —
+   the engine is always-in-market.
 
 ---
 
-## Key parameters to tune (where to look)
+## Key parameters (all via `.env`)
 
-- Trend EMAs: `21`, `55` in `trend_rider_engine.py`.
-- Supertrend: look for its length & multiplier (e.g., `10, 3`).
-- Donchian length: `30` periods (used for breakouts).
-- ATR multiplier for stops: `2.0` (initial stop), trail activation & trail distance in engine.
-- Risk per trade: set in the backtester or trader (fraction of equity).
+- SuperTrend: `ST_PERIOD` (10), `ST_MULT` (3.0).
+- Instruments: `MAIN_SYMBOL` (XAUTUSD), `HEDGE_SYMBOL` (PAXGUSD), `TIMEFRAME` (4h).
+- Sizing/grid: `MAIN_LOTS` (10), `HEDGE_LOTS_PER_STEP` (1), `HEDGE_MAX_LOTS` (5),
+  `STEP_PCT` (1.0), `TP_PCT` (10.0), `LEVERAGE` (5).
+- Operation: `DRY_RUN` (true), `POLL_INTERVAL_SEC` (60).
 
----
-
-## How to run (locally)
-
-- Backtest quickly: `python backtest_cli.py` — uses cached data when available.
-- Run live (paper): configure API keys and run `python delta_trader.py`.
-- Run unit tests: `pytest -q` (ensure test environment and API keys not set for live tests).
+Sizing note: on Delta both symbols have `contract_value = 0.001`, so 1 lot = 1 contract and
+the backtest's oz-sizing equals the live contract-sizing exactly.
 
 ---
 
-## Where to look next (code pointers)
+## How to run
 
-- Signal logic: [trend_rider_engine.py](trend_rider_engine.py#L1)
-- Backtest utilities: [crypto_trend_backtest.py](crypto_trend_backtest.py#L1)
-- Live order placement: [delta_trader.py](delta_trader.py#L1)
-- CLI entrypoint: [backtest_cli.py](backtest_cli.py#L1)
+- Backtest: `python gold_hedge_backtest.py` → regenerates `gold_hedge_backtest_results.md`.
+- Live (paper): configure `.env` and run `python delta_trader.py` (defaults to `DRY_RUN=true`).
+- Tests: `pytest -q`.
 
 ---
 
-If you'd like, I can:
+## Code pointers
 
-- extract the exact parameter values from the code and show the numeric defaults, or
-- create a one-page `README.md` with run examples and typical config, or
-- generate a small diagram (`.svg`) showing the runtime flow.
+- Decision core: [gold_hedge_engine.py](gold_hedge_engine.py#L137)
+- Backtest driver: [gold_hedge_engine.py](gold_hedge_engine.py#L241)
+- Report generator: [gold_hedge_backtest.py](gold_hedge_backtest.py#L1)
+- Live executor: [delta_trader.py](delta_trader.py#L250)
 
-Tell me which of the three you'd like next.
+---
+
+## Caveats
+
+- **Short history.** XAUTUSD lists on Delta from ~April 2026, so the backtest window is only
+  a few months — a mechanics check, not a validated statistical edge.
+- Backtest decisions use 4H **close** prices (no intrabar fills); live samples the mark price
+  each poll, so it is more reactive within a bar, but the decision logic is identical.
+- Fees, funding, and slippage are **not** modelled in the backtest.
+- Real-money trading is gated behind `DRY_RUN="false"`; paper-run first.

@@ -1,0 +1,19 @@
+{
+  "strat": {
+    "pos": "long",
+    "entry_price": 4288.44767124,
+    "top": 0,
+    "hedges": []
+  },
+  "main": {
+    "dir": "long",
+    "entry_price": 4288.44767124,
+    "size": 10,
+    "entry_time": "2026-09-27T10:47:51.365112+00:00",
+    "stop_price": 4325.990818966835,
+    "stop_order_id": null
+  },
+  "hedge_lots": {},
+  "entered_flip_ts": 1790481600,
+  "last_pax": 4280.45040001
+}
