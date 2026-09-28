@@ -88,8 +88,8 @@ class GoldHedgeParams:
     main_lots: int = 10             # XAUT position size, in lots (= contracts)
     hedge_lots_per_step: int = 1    # PAXG lots added per grid step
     max_hedge_lots: int = 5         # cap on simultaneously open PAXG lots
-    step_pct: float = 1.0           # grid step, percent of entry
-    tp_pct: float = 10.0            # take-profit on the main leg, percent
+    step_pct: float = 0.5           # grid step, percent of entry
+    tp_pct: float = 5.0             # take-profit on the main leg, percent
     contract_oz: float = 0.001      # 1 lot = 0.001 oz (Delta contract_value)
     main_symbol: str = "XAUTUSD"
     hedge_symbol: str = "PAXGUSD"

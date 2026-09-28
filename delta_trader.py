@@ -522,12 +522,11 @@ class GoldHedgeTrader:
         size = self.main["size"]
         exit_px = a.price
         if not self.dry_run:
-            if self.main.get("stop_order_id"):
-                try:
-                    self.client.cancel_order_by_id(self.main["stop_order_id"], symbol=self.main_symbol)
-                except Exception as e:
-                    print(f"  [WARN] cancel main stop failed: {e}")
             side = "sell" if direction == "long" else "buy"
+            # Close FIRST; only tear down the protective stop + local state once
+            # the reduce-only close is confirmed. If it fails we must NOT cancel
+            # the stop or clear self.main — otherwise the position is left open
+            # on the exchange, unprotected, and untracked locally.
             try:
                 res = self.client.place_order(self.main_symbol, size, side, "market_order", reduce_only=True)
                 oid = res.get("result", {}).get("id", res.get("id"))
@@ -535,7 +534,18 @@ class GoldHedgeTrader:
                                   {"direction": direction, "side": side, "size": size,
                                    "reduce_only": True, "reason": a.reason})
             except Exception as e:
-                print(f"  \033[91m[CLOSE MAIN FAILED]\033[0m {e}")
+                print(f"  \033[91m[CLOSE MAIN FAILED]\033[0m {e} — position kept, stop left in place.")
+                try:
+                    self.notifier.send(f"⚠️ CLOSE MAIN FAILED on {self.main_symbol}: {e}\n"
+                                       f"Position still OPEN with protective stop. Manual check advised.")
+                except Exception:
+                    pass
+                return  # keep self.main and its stop_order_id intact for retry/reconcile
+            if self.main.get("stop_order_id"):
+                try:
+                    self.client.cancel_order_by_id(self.main["stop_order_id"], symbol=self.main_symbol)
+                except Exception as e:
+                    print(f"  [WARN] cancel main stop failed (position already closed): {e}")
         cv = self._cval(self.main_symbol)
         pnl = (exit_px - entry) * size * cv if direction == "long" else (entry - exit_px) * size * cv
         pnl_inr = pnl * self.usd_inr

@@ -32,7 +32,7 @@ from gold_hedge_engine import GoldHedgeParams, run_backtest, get_metrics
 # CONFIG
 # ----------------------------------------------------------------------------
 DELTA_BASE_URL = "https://api.india.delta.exchange"
-TIMEFRAME = "4h"
+TIMEFRAME = "1h"
 CAPITAL = 100.0
 PARAMS = GoldHedgeParams()   # st(10,3), 10 main lots, 5 max hedge, 1% step, 10% TP, 0.001 oz
 
