@@ -31,6 +31,7 @@ import hmac
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,11 @@ load_dotenv()
 
 import pandas as pd
 import requests
+
+try:
+    import websocket  # provided by the `websocket-client` package
+except ImportError:
+    websocket = None
 
 from gold_hedge_engine import GoldHedgeParams, GoldHedgeStrategy, compute_signals, Action
 from telegram_notifier import TelegramNotifier
@@ -244,6 +250,193 @@ class DeltaClient:
 
 
 # ============================================================================
+# MARKET FEED — Delta Exchange WebSocket (public market-data channels only)
+# ============================================================================
+class MarketFeed:
+    """Push-based market data for the strategy: a rolling candle buffer for the
+    main symbol (SuperTrend history) + latest mark prices for main & hedge.
+
+    Uses only PUBLIC channels (candlestick + v2/ticker), so no WS auth is
+    needed. Orders/positions/reconciliation stay on REST. Runs in a daemon
+    thread with auto-reconnect and an app-level ping; a staleness age lets the
+    caller refuse to trade on a dead socket.
+    """
+
+    def __init__(self, client: "DeltaClient", main_symbol: str, hedge_symbol: str,
+                 timeframe: str, max_bars: int = 300):
+        self.client = client
+        self.main_symbol = main_symbol
+        self.hedge_symbol = hedge_symbol
+        self.timeframe = timeframe.strip().lower()
+        self.max_bars = max_bars
+        self.ws_url = self._derive_ws_url(client.base_url)
+
+        self._lock = threading.Lock()
+        self.event = threading.Event()      # set on each ticker update (wakes the main loop)
+        self._candles: dict = {}             # candle_start_time(sec) -> {o,h,l,c,v}
+        self._marks: dict = {}               # symbol -> (price, monotonic_ts)
+        self._stop = False
+        self._ws = None
+
+    @staticmethod
+    def _derive_ws_url(base_url: str) -> str:
+        host = base_url.split("://", 1)[-1].strip("/")
+        if "testnet" in host:
+            return "wss://socket-ind.testnet.deltaex.org"
+        if host.startswith("api."):
+            host = "socket." + host[len("api."):]
+        else:
+            host = "socket." + host
+        return f"wss://{host}"
+
+    def _candle_channel(self) -> str:
+        return f"candlestick_{self.timeframe}"
+
+    def _tf_seconds(self) -> int:
+        tf = self.timeframe
+        if tf.endswith("h"):
+            return int(tf[:-1]) * 3600
+        if tf.endswith("m"):
+            return int(tf[:-1]) * 60
+        if tf.endswith("d"):
+            return int(tf[:-1]) * 86400
+        return 14400
+
+    def _trim(self):
+        if len(self._candles) > self.max_bars:
+            for k in sorted(self._candles)[:-self.max_bars]:
+                del self._candles[k]
+
+    # -- lifecycle ------------------------------------------------------------
+    def start(self):
+        if websocket is None:
+            raise RuntimeError("websocket-client not installed. Run: pip install -r requirements.txt")
+        self._bootstrap()
+        threading.Thread(target=self._run_forever, daemon=True).start()
+        threading.Thread(target=self._ping_loop, daemon=True).start()
+
+    def stop(self):
+        self._stop = True
+        try:
+            if self._ws:
+                self._ws.close()
+        except Exception:
+            pass
+    # __FEED_APPEND__
+
+    # -- REST bootstrap so SuperTrend has warmup before WS candles arrive -----
+    def _bootstrap(self):
+        try:
+            now = int(time.time())
+            start = now - self.max_bars * self._tf_seconds()
+            raw = self.client.get_candles(self.main_symbol, self.timeframe, start, now)
+            with self._lock:
+                for c in raw:
+                    st = int(c["time"])   # REST candle time is in seconds
+                    self._candles[st] = {"open": float(c["open"]), "high": float(c["high"]),
+                                         "low": float(c["low"]), "close": float(c["close"]),
+                                         "volume": float(c.get("volume", 0) or 0)}
+                self._trim()
+            print(f"  [WS] bootstrapped {len(raw)} {self.timeframe} candles via REST")
+        except Exception as e:
+            print(f"  [WS] candle bootstrap failed: {e}")
+
+    # -- socket loop ----------------------------------------------------------
+    def _run_forever(self):
+        while not self._stop:
+            try:
+                self._ws = websocket.WebSocketApp(
+                    self.ws_url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+                self._ws.run_forever(ping_interval=0)   # app-level ping handled below
+            except Exception as e:
+                print(f"  [WS] run_forever error: {e}")
+            if self._stop:
+                break
+            time.sleep(3)
+            print("  [WS] reconnecting ...")
+
+    def _ping_loop(self):
+        while not self._stop:
+            time.sleep(25)
+            try:
+                if self._ws:
+                    self._ws.send(json.dumps({"type": "ping"}))
+            except Exception:
+                pass
+
+    def _on_open(self, ws):
+        sub = {"type": "subscribe", "payload": {"channels": [
+            {"name": self._candle_channel(), "symbols": [self.main_symbol]},
+            {"name": "v2/ticker", "symbols": [self.main_symbol, self.hedge_symbol]},
+        ]}}
+        try:
+            ws.send(json.dumps({"type": "enable_heartbeat"}))
+            ws.send(json.dumps(sub))
+            print(f"  [WS] connected {self.ws_url} — subscribed {self._candle_channel()} + v2/ticker")
+        except Exception as e:
+            print(f"  [WS] subscribe failed: {e}")
+
+    def _on_error(self, ws, error):
+        print(f"  [WS] error: {error}")
+
+    def _on_close(self, ws, code, msg):
+        print(f"  [WS] closed ({code})")
+
+    def _on_message(self, ws, message):
+        try:
+            m = json.loads(message)
+        except Exception:
+            return
+        mtype = m.get("type", "")
+        now = time.monotonic()
+        if mtype == "v2/ticker":
+            sym = m.get("symbol")
+            price = m.get("mark_price") or m.get("close") or m.get("last_price")
+            if sym and price is not None:
+                try:
+                    with self._lock:
+                        self._marks[sym] = (float(price), now)
+                    self.event.set()
+                except (TypeError, ValueError):
+                    pass
+        elif mtype.startswith("candlestick"):
+            try:
+                st = int(m["candle_start_time"]) // 1_000_000   # µs -> s
+                with self._lock:
+                    self._candles[st] = {"open": float(m["open"]), "high": float(m["high"]),
+                                         "low": float(m["low"]), "close": float(m["close"]),
+                                         "volume": float(m.get("volume", 0) or 0)}
+                    self._trim()
+            except Exception:
+                pass
+
+    # -- thread-safe reads ----------------------------------------------------
+    def candle_df(self):
+        """Rolling OHLCV DataFrame indexed by UTC timestamp (or None if empty)."""
+        with self._lock:
+            candles = dict(self._candles)
+        if not candles:
+            return None
+        rows = [{"ts": pd.to_datetime(st, unit="s", utc=True), **candles[st]}
+                for st in sorted(candles)]
+        return pd.DataFrame(rows).set_index("ts")
+
+    def marks(self):
+        """Return (main_mark, hedge_mark, age_seconds_of_main_mark)."""
+        with self._lock:
+            xaut = self._marks.get(self.main_symbol)
+            pax = self._marks.get(self.hedge_symbol)
+        xaut_p = xaut[0] if xaut else None
+        pax_p = pax[0] if pax else None
+        age = (time.monotonic() - xaut[1]) if xaut else float("inf")
+        return xaut_p, pax_p, age
+
+# ============================================================================
 # GOLD HEDGE TRADER — thin executor around GoldHedgeStrategy
 # ============================================================================
 
@@ -267,6 +460,12 @@ class GoldHedgeTrader:
         self.poll_interval = int(env("POLL_INTERVAL_SEC", "60"))
         self.usd_inr = float(env("USD_INR_RATE", "86.5"))
 
+        # WebSocket-feed tuning
+        self.stale_after = float(env("STALE_AFTER_SEC", "90"))   # refuse to trade if feed older
+        self.ws_min_cycle = float(env("WS_MIN_CYCLE_SEC", "1"))  # throttle floor between cycles
+        self.safety_tick = float(env("SAFETY_TICK_SEC", "5"))    # wake even if the market is quiet
+        self.log_interval = float(env("LOG_INTERVAL_SEC", "30")) # throttle the routine status line
+
         self.params = GoldHedgeParams(
             st_period=int(env("ST_PERIOD", "10")),
             st_mult=float(env("ST_MULT", "3.0")),
@@ -282,6 +481,7 @@ class GoldHedgeTrader:
         self.client = DeltaClient(self.api_key, self.api_secret, self.base_url)
         self.notifier = TelegramNotifier()
         self.strat = GoldHedgeStrategy(self.params)
+        self.feed = MarketFeed(self.client, self.main_symbol, self.hedge_symbol, self.timeframe)
 
         # contract specs for USD PnL (both gold symbols are 0.001 oz/contract)
         self.contract_values = {}
@@ -302,6 +502,9 @@ class GoldHedgeTrader:
         self._force_close = False
         self._force_open = None        # "long" | "short"
         self._want_status = False
+        self._force_clear = False      # queued 'clear' (processed on the main thread)
+        self._stop_threads = False     # signals the telegram thread to exit
+        self._last_log = 0.0           # monotonic ts of last routine status line
 
         self.state_file = Path(os.path.dirname(os.path.abspath(__file__))) / "trader_state.json"
         self.load_state()
@@ -376,6 +579,11 @@ class GoldHedgeTrader:
         return 14400
 
     def _mark_price(self, symbol: str, fallback=None):
+        # Prefer the pushed WS mark; fall back to REST only if the cache is empty.
+        xaut, pax, _ = self.feed.marks()
+        cached = xaut if symbol == self.main_symbol else pax if symbol == self.hedge_symbol else None
+        if cached is not None:
+            return float(cached)
         try:
             t = self.client.get_ticker(symbol)
             mp = t.get("mark_price") or t.get("close")
@@ -386,16 +594,13 @@ class GoldHedgeTrader:
         return fallback
 
     def fetch_signals(self) -> pd.DataFrame:
-        """XAUT candles + SuperTrend. Last row is the forming bar; iloc[-2] is closed."""
-        now = int(time.time())
-        start = now - 250 * self._tf_seconds()
-        raw = self.client.get_candles(self.main_symbol, self.timeframe, start, now)
-        if not raw:
-            raise RuntimeError(f"No candles for {self.main_symbol}")
-        df = pd.DataFrame(raw)
-        df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        """XAUT candles + SuperTrend from the WS buffer. Last row is the forming
+        bar; iloc[-2] is the last closed bar (same contract as the old REST path)."""
+        df = self.feed.candle_df()
+        if df is None or len(df) < 3:
+            raise RuntimeError(f"No candles for {self.main_symbol} (feed warming up)")
         df = df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
-        df = df.sort_values("ts").drop_duplicates("ts").set_index("ts")
+        df = df.sort_index()
         sig = compute_signals(df, self.params).dropna(subset=["st_dir", "st_val"])
         if len(sig) < 3:
             raise RuntimeError("Not enough candles for SuperTrend")
@@ -699,17 +904,42 @@ class GoldHedgeTrader:
         else:
             self._last_pax = pax_price
 
-        print(f"[{ts}] {self.main_symbol} ${xaut_price:,.2f} | ST {'BULL' if st_dir == 1 else 'BEAR'} "
-              f"@ ${st_val:,.2f} | {self.hedge_symbol} ${pax_price:,.2f} | "
-              f"pos={self.strat.pos or 'flat'} hedges={len(self.hedge_lots)}")
+        _, _, age = self.feed.marks()
+        stale = age > self.stale_after
+
+        # Throttle the routine status line (cycles now fire on every WS tick).
+        now_m = time.monotonic()
+        due = (now_m - self._last_log) >= self.log_interval
+        if due:
+            self._last_log = now_m
+            print(f"[{ts}] {self.main_symbol} ${xaut_price:,.2f} | ST {'BULL' if st_dir == 1 else 'BEAR'} "
+                  f"@ ${st_val:,.2f} | {self.hedge_symbol} ${pax_price:,.2f} | "
+                  f"pos={self.strat.pos or 'flat'} hedges={len(self.hedge_lots)} | feed {age:.0f}s")
 
         if self._want_status:
             self._want_status = False
             self._send_status(xaut_price, st_dir, st_val)
+        if self._force_clear:
+            self._force_clear = False
+            self._flatten_local()
+            self.save_state()
+            try:
+                self.notifier.send("✅ Local state cleared (no orders sent).")
+            except Exception:
+                pass
+            return
         if self._force_close:
             self._force_close = False
             self._manual_flatten(xaut_price, pax_price, closed_ts)
             self.save_state()
+            return
+
+        # Never act on a dead/stale socket — the position stays protected by its
+        # exchange stop; queued force-open is preserved for when the feed recovers.
+        if stale:
+            if due:
+                print(f"  \033[93m[WS] feed stale ({age:.0f}s > {self.stale_after:.0f}s) — "
+                      f"skipping trading actions.\033[0m")
             return
 
         forced = self._force_open
@@ -759,21 +989,40 @@ class GoldHedgeTrader:
                               json={"chat_id": chat_id, "text": "❌ Unsubscribed."})
             elif cmd in ("close", "/close"):
                 self._force_close = True
-                self.notifier.send("⏳ Queued CLOSE — flatten all legs on next poll.")
+                self.notifier.send("⏳ Queued CLOSE — flatten all legs on next cycle.")
             elif cmd in ("status", "/status"):
                 self._want_status = True
             elif cmd in ("open", "/open") and len(parts) >= 2 and parts[1] in ("long", "short"):
                 self._force_open = parts[1]
-                self.notifier.send(f"⏳ Queued OPEN {parts[1].upper()} on next poll.")
+                self.notifier.send(f"⏳ Queued OPEN {parts[1].upper()} on next cycle.")
             elif cmd in ("clear", "/clear"):
-                self._flatten_local()
-                self.save_state()
-                self.notifier.send("✅ Local state cleared (no orders sent).")
+                # Defer the state mutation to the main thread (avoids races).
+                self._force_clear = True
+                self.notifier.send("⏳ Queued CLEAR — resetting local state on next cycle.")
         return last_update_id
+
+    def _telegram_loop(self):
+        """Poll Telegram commands in a daemon thread so market data never blocks."""
+        last_update_id = 0
+        try:
+            flush = self.notifier.get_updates(offset=-1)
+            if flush:
+                last_update_id = flush[0]["update_id"]
+        except Exception:
+            pass
+        while not self._stop_threads:
+            try:
+                last_update_id = self._handle_telegram(last_update_id)
+            except Exception as e:
+                print(f"  [WARN] Telegram poll failed: {e}")
+            time.sleep(2)
 
     def start_loop(self):
         if not self.dry_run and (not self.api_key or not self.api_secret):
             print("\033[91m[FATAL] LIVE mode but DELTA_API_KEY / DELTA_API_SECRET missing.\033[0m")
+            sys.exit(1)
+        if websocket is None:
+            print("\033[91m[FATAL] websocket-client not installed. Run: pip install -r requirements.txt\033[0m")
             sys.exit(1)
 
         self.reconcile()
@@ -784,35 +1033,38 @@ class GoldHedgeTrader:
         except Exception:
             pass
 
-        last_update_id = 0
-        try:
-            flush = self.notifier.get_updates(offset=-1)
-            if flush:
-                last_update_id = flush[0]["update_id"]
-        except Exception:
-            pass
+        # Start the WebSocket market feed + a Telegram command thread.
+        self.feed.start()
+        threading.Thread(target=self._telegram_loop, daemon=True).start()
 
-        print(f"Polling every {self.poll_interval}s. Commands: open long|short, close, status, clear. Ctrl+C to stop.")
+        print(f"WebSocket feed live ({self.feed.ws_url}). Cycles are push-driven "
+              f"(safety tick {self.safety_tick:g}s, min {self.ws_min_cycle:g}s). "
+              f"Commands: open long|short, close, status, clear. Ctrl+C to stop.")
         cycle = 0
+        last_cycle = 0.0
         try:
             while True:
-                try:
-                    last_update_id = self._handle_telegram(last_update_id)
-                except Exception as e:
-                    print(f"  [WARN] Telegram poll failed: {e}")
+                # Block until a market update is pushed, or wake on the safety tick
+                # so TP re-checks and queued commands still run in a quiet market.
+                self.feed.event.wait(timeout=self.safety_tick)
+                self.feed.event.clear()
+
+                # Throttle floor: a burst of ticks must not hammer the order path.
+                gap = time.monotonic() - last_cycle
+                if gap < self.ws_min_cycle:
+                    time.sleep(self.ws_min_cycle - gap)
+                last_cycle = time.monotonic()
 
                 cycle += 1
-                stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                print(f"\n{'─' * 68}\n  Cycle #{cycle} | {stamp}\n{'─' * 68}")
                 try:
                     self.run_cycle()
                 except Exception as e:
                     print(f"  \033[91mCycle error:\033[0m {e}")
                     import traceback
                     traceback.print_exc()
-
-                time.sleep(self.poll_interval)
         except KeyboardInterrupt:
+            self._stop_threads = True
+            self.feed.stop()
             print("\nStopping trader. Goodbye!")
 
 
